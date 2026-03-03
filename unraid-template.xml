@@ -1,0 +1,44 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>NullFeed</Name>
+  <Repository>nullfeed/nullfeed-backend</Repository>
+  <Registry>https://hub.docker.com/r/nullfeed/nullfeed-backend</Registry>
+  <Network>bridge</Network>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/nullfeed/nullfeed-backend/issues</Support>
+  <Project>https://github.com/nullfeed/nullfeed-backend</Project>
+  <Overview>
+    NullFeed is a self-hosted YouTube media center. It automatically downloads
+    videos from your subscribed channels and provides a streaming-service-quality
+    browsing experience via its iOS and tvOS Flutter app.
+  </Overview>
+  <Category>MediaApp:Video</Category>
+  <WebUI>http://[IP]:[PORT:8484]/docs</WebUI>
+  <Icon>https://raw.githubusercontent.com/nullfeed/nullfeed-backend/main/icon.png</Icon>
+  <ExtraParams/>
+  <PostArgs/>
+  <DateInstalled/>
+  <Description>
+    NullFeed - Self-Hosted YouTube Media Center. Wraps yt-dlp with a polished
+    multi-user experience, AI recommendations, and resume-aware playback.
+  </Description>
+
+  <!-- Ports -->
+  <Config Name="API Port" Target="8484" Default="8484" Mode="tcp" Description="NullFeed API port" Type="Port" Display="always" Required="true" Mask="false">8484</Config>
+
+  <!-- Volumes -->
+  <Config Name="Media" Target="/data/media" Default="/mnt/user/appdata/nullfeed/media" Mode="rw" Description="Downloaded video/audio files" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/nullfeed/media</Config>
+  <Config Name="Database" Target="/data/db" Default="/mnt/user/appdata/nullfeed/db" Mode="rw" Description="SQLite database and migrations" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/nullfeed/db</Config>
+  <Config Name="Config" Target="/data/config" Default="/mnt/user/appdata/nullfeed/config" Mode="rw" Description="App configuration" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/nullfeed/config</Config>
+  <Config Name="Thumbnails" Target="/data/thumbnails" Default="/mnt/user/appdata/nullfeed/thumbs" Mode="rw" Description="Cached thumbnails" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/nullfeed/thumbs</Config>
+
+  <!-- Environment Variables -->
+  <Config Name="TUBEVAULT_PORT" Target="TUBEVAULT_PORT" Default="8484" Description="API listen port" Type="Variable" Display="always" Required="false" Mask="false">8484</Config>
+  <Config Name="ANTHROPIC_API_KEY" Target="ANTHROPIC_API_KEY" Default="" Description="Anthropic API key for AI recommendations" Type="Variable" Display="always" Required="false" Mask="true"/>
+  <Config Name="DOWNLOAD_CONCURRENCY" Target="DOWNLOAD_CONCURRENCY" Default="2" Description="Max simultaneous downloads" Type="Variable" Display="advanced" Required="false" Mask="false">2</Config>
+  <Config Name="MEDIA_QUALITY" Target="MEDIA_QUALITY" Default="1080p" Description="Download quality (720p/1080p/4k/best)" Type="Variable" Display="always" Required="false" Mask="false">1080p</Config>
+  <Config Name="CHECK_INTERVAL_MINUTES" Target="CHECK_INTERVAL_MINUTES" Default="60" Description="Channel poll interval in minutes" Type="Variable" Display="advanced" Required="false" Mask="false">60</Config>
+  <Config Name="PUID" Target="PUID" Default="1000" Description="User ID for file permissions" Type="Variable" Display="advanced" Required="false" Mask="false">1000</Config>
+  <Config Name="PGID" Target="PGID" Default="1000" Description="Group ID for file permissions" Type="Variable" Display="advanced" Required="false" Mask="false">1000</Config>
+</Container>

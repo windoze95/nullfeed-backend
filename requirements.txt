@@ -1,0 +1,16 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+sqlalchemy==2.0.36
+alembic==1.14.1
+aiosqlite==0.20.0
+celery==5.4.0
+redis==5.2.1
+yt-dlp==2025.1.26
+anthropic==0.43.0
+pydantic==2.10.4
+pydantic-settings==2.7.1
+python-multipart==0.0.20
+websockets==14.1
+httpx==0.28.1
+passlib==1.7.4
+bcrypt==4.2.1

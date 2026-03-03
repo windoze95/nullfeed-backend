@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint & Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install ruff mypy
+
+      - name: Run ruff linter
+        run: ruff check .
+
+      - name: Run ruff format check
+        run: ruff format --check .
+
+      - name: Run mypy
+        run: mypy app/ --ignore-missing-imports
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: "sqlite+aiosqlite:///./test.db"
+      TUBEVAULT_PORT: "8484"
+      REDIS_URL: "redis://localhost:6379"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio httpx
+
+      - name: Run tests
+        run: pytest tests/ -v --tb=short
+
+  docker-build:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  dependency-audit:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install pip-audit
+        run: pip install pip-audit
+
+      - name: Run pip-audit
+        run: pip-audit -r requirements.txt
+
+  ytdlp-version-check:
+    name: yt-dlp Version Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check yt-dlp is latest
+        run: |
+          PINNED=$(grep -oP 'yt-dlp==\K[0-9.]+' requirements.txt)
+          LATEST=$(pip index versions yt-dlp 2>/dev/null | grep -oP 'yt-dlp \(\K[0-9.]+' || true)
+          if [ -z "$LATEST" ]; then
+            pip install yt-dlp --dry-run 2>&1 | head -5
+            echo "::warning::Could not determine latest yt-dlp version automatically"
+            exit 0
+          fi
+          echo "Pinned: $PINNED"
+          echo "Latest: $LATEST"
+          if [ "$PINNED" != "$LATEST" ]; then
+            echo "::warning::yt-dlp is outdated: pinned=$PINNED latest=$LATEST"
+          else
+            echo "yt-dlp is up to date"
+          fi

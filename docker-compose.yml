@@ -1,0 +1,22 @@
+version: "3.8"
+
+services:
+  nullfeed:
+    build: .
+    container_name: nullfeed
+    restart: unless-stopped
+    ports:
+      - "${TUBEVAULT_PORT:-8484}:${TUBEVAULT_PORT:-8484}"
+    environment:
+      - TUBEVAULT_PORT=${TUBEVAULT_PORT:-8484}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - DOWNLOAD_CONCURRENCY=${DOWNLOAD_CONCURRENCY:-2}
+      - MEDIA_QUALITY=${MEDIA_QUALITY:-1080p}
+      - CHECK_INTERVAL_MINUTES=${CHECK_INTERVAL_MINUTES:-60}
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+    volumes:
+      - ${MEDIA_PATH:-./data/media}:/data/media
+      - ${DB_PATH:-./data/db}:/data/db
+      - ${CONFIG_PATH:-./data/config}:/data/config
+      - ${THUMBS_PATH:-./data/thumbnails}:/data/thumbnails
