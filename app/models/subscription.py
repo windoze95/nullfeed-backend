@@ -16,6 +16,7 @@ class UserSubscription(Base):
     )
     retention_policy: Mapped[str] = mapped_column(String(20), default="KEEP_ALL")
     retention_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    tracking_mode: Mapped[str] = mapped_column(String(20), default="FUTURE_ONLY")
 
     user = relationship("User", back_populates="subscriptions")
     channel = relationship("Channel", back_populates="subscriptions")

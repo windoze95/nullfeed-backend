@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
 
     # Downloads
+    catalog_fetch_count: int = 50
     download_concurrency: int = 2
     media_quality: str = "1080p"
     check_interval_minutes: int = 60

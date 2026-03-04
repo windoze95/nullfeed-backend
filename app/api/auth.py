@@ -2,7 +2,7 @@ import hashlib
 import secrets
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,7 +21,7 @@ def _hash_pin(pin: str) -> str:
 
 
 async def get_current_user(
-    x_user_token: str | None = None,
+    x_user_token: str | None = Header(None),
     db: AsyncSession = Depends(get_db),
 ) -> User:
     """Resolve the current user from the X-User-Token header."""
@@ -35,6 +35,11 @@ async def get_current_user(
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
     return user
+
+
+def validate_token(token: str) -> str | None:
+    """Look up a session token and return the user_id, or None."""
+    return _sessions.get(token)
 
 
 @router.post("/profiles", response_model=list[UserProfile])

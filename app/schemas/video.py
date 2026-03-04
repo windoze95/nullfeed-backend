@@ -11,10 +11,11 @@ class VideoOut(BaseModel):
     duration_seconds: int = 0
     uploaded_at: datetime | None = None
     file_size_bytes: int = 0
-    status: str = "PENDING"
+    status: str = "CATALOGED"
     thumbnail_url: str | None = None
     watch_position_seconds: int = 0
     is_watched: bool = False
+    channel_name: str = ""
 
     model_config = {"from_attributes": True}
 

@@ -53,6 +53,7 @@ def upgrade() -> None:
         sa.Column("file_size_bytes", sa.BigInteger, nullable=True, server_default="0"),
         sa.Column("status", sa.String(20), nullable=False, server_default="PENDING"),
         sa.Column("metadata_json", sa.JSON, nullable=True),
+        sa.Column("created_at", sa.DateTime, nullable=False, server_default=sa.func.now()),
     )
     op.create_index("ix_videos_channel_id", "videos", ["channel_id"])
     op.create_index("ix_videos_status", "videos", ["status"])

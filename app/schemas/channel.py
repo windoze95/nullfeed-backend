@@ -23,7 +23,9 @@ class ChannelSubscribe(BaseModel):
     youtube_channel_id: str | None = None
     retention_policy: str = "KEEP_ALL"
     retention_count: int | None = None
+    tracking_mode: str = "FUTURE_ONLY"
 
 
 class ChannelDetail(ChannelOut):
     subscriber_count: int = 0
+    tracking_mode: str | None = None

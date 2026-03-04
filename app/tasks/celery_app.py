@@ -7,6 +7,7 @@ celery_app = Celery(
     "nullfeed",
     broker=settings.redis_url,
     backend=settings.redis_url,
+    include=["app.tasks.download_tasks"],
 )
 
 celery_app.conf.update(
@@ -28,5 +29,3 @@ celery_app.conf.beat_schedule = {
     },
 }
 
-# Auto-discover tasks
-celery_app.autodiscover_tasks(["app.tasks"])

@@ -14,6 +14,7 @@ from app.models.user_video_ref import UserVideoRef
 from app.models.video import Video
 from app.schemas.channel import ChannelDetail, ChannelOut, ChannelSubscribe
 from app.schemas.video import VideoOut, VideoPagination
+from app.services.download_manager import fetch_channel_metadata
 from app.tasks.download_tasks import poll_channel_task
 
 router = APIRouter(prefix="/api/channels", tags=["channels"])
@@ -65,20 +66,28 @@ async def subscribe(
     if not yt_channel_id:
         raise HTTPException(status_code=400, detail="Provide url or youtube_channel_id")
 
-    # Check if channel already exists
+    # Resolve channel metadata to get canonical UC ID and display name.
+    # This lets us detect duplicates when subscribing via handle vs UC ID.
+    meta = await _resolve_channel(yt_channel_id)
+    canonical_id = meta.get("channel_id", yt_channel_id)
+    resolved_name = meta.get("name", yt_channel_id)
+
+    # Check if channel already exists (match either the input ID or canonical UC ID)
     result = await db.execute(
-        select(Channel).where(Channel.youtube_channel_id == yt_channel_id)
+        select(Channel).where(
+            Channel.youtube_channel_id.in_([yt_channel_id, canonical_id])
+        )
     )
     channel = result.scalar_one_or_none()
 
     if not channel:
-        # Create the channel record; the poller will fill in metadata.
+        # Create the channel record with resolved metadata
         channel = Channel(
             id=str(uuid.uuid4()),
-            youtube_channel_id=yt_channel_id,
-            name=yt_channel_id,
-            slug=_slugify(yt_channel_id),
-            description="",
+            youtube_channel_id=canonical_id,
+            name=resolved_name,
+            slug=_slugify(resolved_name if resolved_name != yt_channel_id else yt_channel_id),
+            description=meta.get("description", ""),
         )
         db.add(channel)
         await db.flush()
@@ -99,12 +108,13 @@ async def subscribe(
         channel_id=channel.id,
         retention_policy=body.retention_policy,
         retention_count=body.retention_count,
+        tracking_mode=body.tracking_mode,
     )
     db.add(sub)
 
-    # Create user video refs for any existing videos in this channel
+    # Create user video refs for ALL existing videos in this channel (not just COMPLETE)
     video_result = await db.execute(
-        select(Video).where(Video.channel_id == channel.id, Video.status == "COMPLETE")
+        select(Video).where(Video.channel_id == channel.id)
     )
     existing_videos = video_result.scalars().all()
     for video in existing_videos:
@@ -178,12 +188,14 @@ async def get_channel(
             UserSubscription.channel_id == channel_id,
         )
     )
-    is_subscribed = sub_result.scalar_one_or_none() is not None
+    sub = sub_result.scalar_one_or_none()
 
     detail = ChannelDetail.model_validate(channel)
     detail.subscriber_count = subscriber_count
     detail.video_count = video_count
-    detail.is_subscribed = is_subscribed
+    detail.is_subscribed = sub is not None
+    if sub:
+        detail.tracking_mode = sub.tracking_mode
     return detail
 
 
@@ -228,7 +240,7 @@ async def list_channel_videos(
             title=v.title,
             duration_seconds=v.duration_seconds,
             uploaded_at=v.uploaded_at,
-            file_size_bytes=v.file_size_bytes,
+            file_size_bytes=v.file_size_bytes or 0,
             status=v.status,
             thumbnail_url=f"/data/thumbnails/{v.youtube_video_id}.jpg",
             watch_position_seconds=ref.watch_position_seconds if ref else 0,
@@ -252,3 +264,13 @@ def _extract_channel_id(url: str) -> str | None:
         if match:
             return match.group(1)
     return None
+
+
+async def _resolve_channel(yt_channel_id: str) -> dict:
+    """Resolve a YouTube channel handle/ID to its canonical metadata.
+
+    Runs the blocking yt-dlp call in a thread to avoid blocking the event loop.
+    """
+    import asyncio
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, fetch_channel_metadata, yt_channel_id)
