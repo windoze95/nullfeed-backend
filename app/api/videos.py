@@ -15,7 +15,7 @@ from app.models.video import Video
 from app.schemas.video import VideoDetail, VideoOut, VideoProgress
 from app.services.media_server import build_range_response
 from app.services.storage import check_and_delete_orphan
-from app.tasks.download_tasks import download_video_task
+from app.tasks.download_tasks import download_preview_task, download_video_task
 
 router = APIRouter(prefix="/api/videos", tags=["videos"])
 
@@ -55,6 +55,7 @@ async def get_active_downloads(
             uploaded_at=v.uploaded_at,
             file_size_bytes=v.file_size_bytes or 0,
             status=v.status,
+            preview_status=v.preview_status,
             thumbnail_url=f"/data/thumbnails/{v.youtube_video_id}.jpg",
             channel_name=v.channel.name if v.channel else "",
         )
@@ -94,6 +95,7 @@ async def get_video(
         uploaded_at=video.uploaded_at,
         file_size_bytes=video.file_size_bytes or 0,
         status=video.status,
+        preview_status=video.preview_status,
         thumbnail_url=f"/data/thumbnails/{video.youtube_video_id}.jpg",
         watch_position_seconds=ref.watch_position_seconds if ref else 0,
         is_watched=ref.is_watched if ref else False,
@@ -146,6 +148,66 @@ async def cancel_download(
     await db.commit()
 
     return {"detail": "Download cancelled", "video_id": video_id}
+
+
+@router.post("/{video_id}/preview")
+async def request_preview(
+    video_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    result = await db.execute(select(Video).where(Video.id == video_id))
+    video = result.scalar_one_or_none()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    if video.status == "COMPLETE":
+        return {"preview_status": None, "detail": "HQ already complete"}
+
+    if video.preview_status in ("DOWNLOADING", "READY"):
+        return {"preview_status": video.preview_status}
+
+    download_preview_task.delay(video_id, user.id)
+    return {"preview_status": "DOWNLOADING"}
+
+
+@router.get("/{video_id}/preview-stream")
+async def stream_preview(
+    video_id: str,
+    token: str | None = None,
+    x_user_token: str | None = Header(None),
+    db: AsyncSession = Depends(get_db),
+    range_header: str | None = Header(None, alias="Range"),
+):
+    auth_token = token or x_user_token
+    if not auth_token or not validate_token(auth_token):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    result = await db.execute(select(Video).where(Video.id == video_id))
+    video = result.scalar_one_or_none()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    if video.preview_status != "READY" or not video.preview_file_path:
+        raise HTTPException(status_code=404, detail="Preview not available")
+
+    file_path = video.preview_file_path
+    if not os.path.isabs(file_path):
+        file_path = os.path.join("/data/media", file_path)
+
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Preview file missing from disk")
+
+    if range_header:
+        return build_range_response(file_path, range_header)
+
+    return FileResponse(
+        file_path,
+        media_type="video/mp4",
+        headers={
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(os.path.getsize(file_path)),
+        },
+    )
 
 
 @router.get("/{video_id}/stream")

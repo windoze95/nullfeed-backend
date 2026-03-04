@@ -14,7 +14,7 @@ from app.models.user_video_ref import UserVideoRef
 from app.models.video import Video
 from app.schemas.channel import ChannelDetail, ChannelOut, ChannelSubscribe
 from app.schemas.video import VideoOut, VideoPagination
-from app.services.download_manager import fetch_channel_metadata
+from app.services.download_manager import fetch_channel_images, fetch_channel_metadata
 from app.tasks.download_tasks import poll_channel_task
 
 router = APIRouter(prefix="/api/channels", tags=["channels"])
@@ -81,6 +81,9 @@ async def subscribe(
     channel = result.scalar_one_or_none()
 
     if not channel:
+        # Fetch channel avatar & banner from YouTube
+        images = await _resolve_channel_images(canonical_id)
+
         # Create the channel record with resolved metadata
         channel = Channel(
             id=str(uuid.uuid4()),
@@ -88,6 +91,8 @@ async def subscribe(
             name=resolved_name,
             slug=_slugify(resolved_name if resolved_name != yt_channel_id else yt_channel_id),
             description=meta.get("description", ""),
+            avatar_url=images.get("avatar_url"),
+            banner_url=images.get("banner_url"),
         )
         db.add(channel)
         await db.flush()
@@ -274,3 +279,13 @@ async def _resolve_channel(yt_channel_id: str) -> dict:
     import asyncio
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, fetch_channel_metadata, yt_channel_id)
+
+
+async def _resolve_channel_images(yt_channel_id: str) -> dict:
+    """Fetch channel avatar and banner URLs from YouTube.
+
+    Runs the blocking HTTP call in a thread to avoid blocking the event loop.
+    """
+    import asyncio
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, fetch_channel_images, yt_channel_id)

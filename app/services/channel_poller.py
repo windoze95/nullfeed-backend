@@ -1,6 +1,6 @@
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -9,7 +9,7 @@ from app.models.channel import Channel
 from app.models.subscription import UserSubscription
 from app.models.user_video_ref import UserVideoRef
 from app.models.video import Video
-from app.services.download_manager import fetch_channel_metadata, fetch_channel_videos
+from app.services.download_manager import fetch_channel_images, fetch_channel_metadata, fetch_channel_videos
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +116,7 @@ def poll_single_channel(channel_id: str, db: Session) -> dict:
 
 
 def _update_channel_metadata(channel: Channel, channel_meta: dict | None, db: Session) -> None:
-    """Update channel name and canonical youtube_channel_id from yt-dlp playlist metadata."""
+    """Update channel name, canonical youtube_channel_id, and images from yt-dlp playlist metadata."""
     if not channel_meta:
         return
 
@@ -145,6 +145,17 @@ def _update_channel_metadata(channel: Channel, channel_meta: dict | None, db: Se
                 channel.id, channel.youtube_channel_id, canonical_id,
             )
             channel.youtube_channel_id = canonical_id
+
+    # Fetch avatar & banner from YouTube if missing or stale (>30 days)
+    images_missing = not channel.avatar_url or not channel.banner_url
+    images_stale = channel.last_checked_at is None or (datetime.utcnow() - channel.last_checked_at) > timedelta(days=30)
+    if images_missing or images_stale:
+        images = fetch_channel_images(channel.youtube_channel_id)
+        if images:
+            if images.get("avatar_url"):
+                channel.avatar_url = images["avatar_url"]
+            if images.get("banner_url"):
+                channel.banner_url = images["banner_url"]
 
 
 def _determine_auto_downloads(

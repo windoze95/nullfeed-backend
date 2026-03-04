@@ -9,18 +9,42 @@ from app.models.subscription import UserSubscription
 from app.models.user import User
 from app.models.user_video_ref import UserVideoRef
 from app.models.video import Video
-from app.schemas.feed import ContinueWatchingItem, NewEpisodesItem
+from app.schemas.channel import ChannelOut
+from app.schemas.feed import FeedItem
 from app.schemas.video import VideoOut
 
 router = APIRouter(prefix="/api/feed", tags=["feed"])
 
 
-@router.get("/continue-watching", response_model=list[ContinueWatchingItem])
+def _channel_out(channel: Channel) -> ChannelOut:
+    """Build a ChannelOut from an ORM Channel, omitting per-request fields."""
+    out = ChannelOut.model_validate(channel)
+    return out
+
+
+def _video_out(video: Video, ref: UserVideoRef | None = None) -> VideoOut:
+    return VideoOut(
+        id=video.id,
+        youtube_video_id=video.youtube_video_id,
+        channel_id=video.channel_id,
+        title=video.title,
+        duration_seconds=video.duration_seconds,
+        uploaded_at=video.uploaded_at,
+        file_size_bytes=video.file_size_bytes or 0,
+        status=video.status,
+        preview_status=video.preview_status,
+        thumbnail_url=f"/data/thumbnails/{video.youtube_video_id}.jpg",
+        watch_position_seconds=ref.watch_position_seconds if ref else 0,
+        is_watched=ref.is_watched if ref else False,
+    )
+
+
+@router.get("/continue-watching", response_model=list[FeedItem])
 async def continue_watching(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     limit: int = Query(20, ge=1, le=50),
-) -> list[ContinueWatchingItem]:
+) -> list[FeedItem]:
     """Videos with partial progress, ordered by most recently watched."""
     result = await db.execute(
         select(UserVideoRef, Video, Channel)
@@ -45,35 +69,20 @@ async def continue_watching(
             continue
         seen_channels.add(channel.id)
         items.append(
-            ContinueWatchingItem(
-                channel_id=channel.id,
-                channel_name=channel.name,
-                channel_slug=channel.slug,
-                channel_avatar_url=channel.avatar_url,
-                video=VideoOut(
-                    id=video.id,
-                    youtube_video_id=video.youtube_video_id,
-                    channel_id=video.channel_id,
-                    title=video.title,
-                    duration_seconds=video.duration_seconds,
-                    uploaded_at=video.uploaded_at,
-                    file_size_bytes=video.file_size_bytes,
-                    status=video.status,
-                    thumbnail_url=f"/data/thumbnails/{video.youtube_video_id}.jpg",
-                    watch_position_seconds=ref.watch_position_seconds,
-                    is_watched=ref.is_watched,
-                ),
+            FeedItem(
+                channel=_channel_out(channel),
+                video=_video_out(video, ref),
             )
         )
     return items
 
 
-@router.get("/new-episodes", response_model=list[NewEpisodesItem])
+@router.get("/new-episodes", response_model=list[FeedItem])
 async def new_episodes(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     limit: int = Query(20, ge=1, le=50),
-) -> list[NewEpisodesItem]:
+) -> list[FeedItem]:
     """Channels that have unwatched downloads for this user."""
     # Get user's subscribed channel IDs
     sub_result = await db.execute(
@@ -107,42 +116,26 @@ async def new_episodes(
 
         ref, latest_video = unwatched_rows[0]
         items.append(
-            NewEpisodesItem(
-                channel_id=channel.id,
-                channel_name=channel.name,
-                channel_slug=channel.slug,
-                channel_avatar_url=channel.avatar_url,
-                channel_banner_url=channel.banner_url,
-                unwatched_count=len(unwatched_rows),
-                latest_video=VideoOut(
-                    id=latest_video.id,
-                    youtube_video_id=latest_video.youtube_video_id,
-                    channel_id=latest_video.channel_id,
-                    title=latest_video.title,
-                    duration_seconds=latest_video.duration_seconds,
-                    uploaded_at=latest_video.uploaded_at,
-                    file_size_bytes=latest_video.file_size_bytes,
-                    status=latest_video.status,
-                    thumbnail_url=f"/data/thumbnails/{latest_video.youtube_video_id}.jpg",
-                    watch_position_seconds=ref.watch_position_seconds,
-                    is_watched=ref.is_watched,
-                ),
+            FeedItem(
+                channel=_channel_out(channel),
+                video=_video_out(latest_video, ref),
             )
         )
 
     return items[:limit]
 
 
-@router.get("/recently-added", response_model=list[VideoOut])
+@router.get("/recently-added", response_model=list[FeedItem])
 async def recently_added(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     limit: int = Query(20, ge=1, le=50),
-) -> list[VideoOut]:
+) -> list[FeedItem]:
     """Chronological list of newly downloaded videos across subscribed channels."""
     result = await db.execute(
-        select(UserVideoRef, Video)
+        select(UserVideoRef, Video, Channel)
         .join(Video, UserVideoRef.video_id == Video.id)
+        .join(Channel, Video.channel_id == Channel.id)
         .where(
             UserVideoRef.user_id == user.id,
             UserVideoRef.removed_at.is_(None),
@@ -154,18 +147,9 @@ async def recently_added(
     rows = result.all()
 
     return [
-        VideoOut(
-            id=video.id,
-            youtube_video_id=video.youtube_video_id,
-            channel_id=video.channel_id,
-            title=video.title,
-            duration_seconds=video.duration_seconds,
-            uploaded_at=video.uploaded_at,
-            file_size_bytes=video.file_size_bytes,
-            status=video.status,
-            thumbnail_url=f"/data/thumbnails/{video.youtube_video_id}.jpg",
-            watch_position_seconds=ref.watch_position_seconds,
-            is_watched=ref.is_watched,
+        FeedItem(
+            channel=_channel_out(channel),
+            video=_video_out(video, ref),
         )
-        for ref, video in rows
+        for ref, video, channel in rows
     ]

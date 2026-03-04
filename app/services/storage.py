@@ -35,6 +35,18 @@ async def check_and_delete_orphan(video_id: str, db: AsyncSession) -> bool:
     if not video:
         return False
 
+    # Delete preview file
+    if video.preview_file_path:
+        preview_path = video.preview_file_path
+        if not os.path.isabs(preview_path):
+            preview_path = os.path.join(settings.media_path, preview_path)
+        if os.path.exists(preview_path):
+            try:
+                os.remove(preview_path)
+                logger.info("Deleted orphaned preview file: %s", preview_path)
+            except OSError:
+                logger.exception("Failed to delete preview file: %s", preview_path)
+
     # Delete media file
     if video.file_path:
         full_path = video.file_path

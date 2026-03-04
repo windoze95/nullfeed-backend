@@ -20,6 +20,8 @@ class Video(Base):
     file_size_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
     status: Mapped[str] = mapped_column(String(20), default="PENDING")
     metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    preview_file_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    preview_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
     )

@@ -6,6 +6,8 @@ import json
 import time
 from collections.abc import Callable
 
+import httpx
+
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -115,6 +117,79 @@ def download_video(
     }
 
 
+def download_preview(
+    youtube_video_id: str,
+    channel_slug: str,
+    video_id: str,
+) -> dict:
+    """
+    Download a low-quality pre-muxed 360p preview. Returns metadata dict on success.
+    No split streams, no merge step — fast and lightweight.
+    Raises RuntimeError on failure.
+    """
+    output_dir = os.path.join(settings.media_path, channel_slug)
+    os.makedirs(output_dir, exist_ok=True)
+
+    output_template = os.path.join(output_dir, f"{video_id}_preview.%(ext)s")
+
+    # Pre-muxed formats only — no merge needed
+    format_str = (
+        "best[height<=360][ext=mp4]/"
+        "best[height<=480][ext=mp4]/"
+        "worst[ext=mp4]"
+    )
+
+    url = f"https://www.youtube.com/watch?v={youtube_video_id}"
+
+    cmd = [
+        "yt-dlp",
+        "--format", format_str,
+        "--output", output_template,
+        "--no-playlist",
+        "--retries", "3",
+        "--no-overwrites",
+        url,
+    ]
+
+    logger.info("Starting preview download: %s", youtube_video_id)
+
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+
+    try:
+        process.wait(timeout=120)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        raise RuntimeError(f"Preview download timed out for {youtube_video_id}")
+
+    if process.returncode != 0:
+        raise RuntimeError(f"Preview download failed for {youtube_video_id}")
+
+    file_path = _find_preview_file(output_dir, video_id)
+    if not file_path:
+        raise RuntimeError(f"Preview file not found for {youtube_video_id}")
+
+    file_size = os.path.getsize(file_path)
+    relative_path = os.path.relpath(file_path, settings.media_path)
+
+    return {
+        "file_path": relative_path,
+        "file_size_bytes": file_size,
+    }
+
+
+def _find_preview_file(output_dir: str, video_id: str) -> str | None:
+    """Find the downloaded preview file in the output directory."""
+    for f in os.listdir(output_dir):
+        if f.startswith(f"{video_id}_preview") and not f.endswith(".part"):
+            return os.path.join(output_dir, f)
+    return None
+
+
 def _find_downloaded_file(output_dir: str, video_id: str) -> str | None:
     """Find the downloaded video file in the output directory."""
     for f in os.listdir(output_dir):
@@ -211,6 +286,66 @@ def fetch_channel_metadata(youtube_channel_id: str) -> dict:
         logger.warning("Failed to fetch channel metadata for %s: %s", youtube_channel_id, e)
 
     return {"name": youtube_channel_id, "description": "", "channel_id": youtube_channel_id, "handle": None}
+
+
+def fetch_channel_images(youtube_channel_id: str) -> dict:
+    """Fetch channel avatar and banner image URLs from the YouTube channel page.
+
+    Returns dict with 'avatar_url' and 'banner_url' (either may be None).
+    """
+    url = _build_channel_url(youtube_channel_id)
+
+    try:
+        resp = httpx.get(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+                "Accept-Language": "en-US,en;q=0.9",
+            },
+            cookies={"CONSENT": "YES+1"},
+            follow_redirects=True,
+            timeout=15,
+        )
+        html = resp.text
+
+        avatar_url = None
+        banner_url = None
+
+        # Avatar: extract from og:image meta tag (reliable across page versions)
+        m = re.search(r'<meta\s+property="og:image"\s+content="([^"]+)"', html)
+        if m:
+            avatar_url = m.group(1)
+
+        # Banner: search for banner thumbnails in page data
+        for marker in ('"banner":{"thumbnails"', '"imageBannerViewModel"'):
+            pos = html.find(marker)
+            if pos >= 0:
+                segment = html[pos : pos + 3000]
+                urls = re.findall(
+                    r'"(https://yt3\.googleusercontent\.com/[^"]+)"', segment
+                )
+                if urls:
+                    # Last URL is typically the highest resolution
+                    banner_url = urls[-1].replace("\\u0026", "&")
+                break
+
+        logger.info(
+            "Channel images for %s: avatar=%s, banner=%s",
+            youtube_channel_id,
+            bool(avatar_url),
+            bool(banner_url),
+        )
+        return {"avatar_url": avatar_url, "banner_url": banner_url}
+
+    except Exception as e:
+        logger.warning(
+            "Failed to fetch channel images for %s: %s", youtube_channel_id, e
+        )
+        return {"avatar_url": None, "banner_url": None}
 
 
 def fetch_channel_videos(youtube_channel_id: str, max_videos: int = 50) -> dict:

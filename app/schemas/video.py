@@ -12,6 +12,7 @@ class VideoOut(BaseModel):
     uploaded_at: datetime | None = None
     file_size_bytes: int = 0
     status: str = "CATALOGED"
+    preview_status: str | None = None
     thumbnail_url: str | None = None
     watch_position_seconds: int = 0
     is_watched: bool = False

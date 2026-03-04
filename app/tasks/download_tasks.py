@@ -8,10 +8,15 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.config import settings
 from app.tasks.celery_app import celery_app
 from app.models.channel import Channel
+from app.models.subscription import UserSubscription
 from app.models.video import Video
 from app.services.channel_poller import poll_all_channels, poll_single_channel
-from app.services.download_manager import download_video
-from app.services.progress_broadcaster import publish_download_progress
+from app.services.download_manager import download_preview, download_video
+from app.services.progress_broadcaster import (
+    publish_download_complete,
+    publish_download_progress,
+    publish_preview_ready,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -147,7 +152,28 @@ def download_video_task(self, video_id: str, user_id: str | None = None) -> dict
             except (ValueError, TypeError):
                 pass
 
+        # Clean up preview file now that HQ is ready
+        if video.preview_file_path:
+            preview_path = os.path.join(settings.media_path, video.preview_file_path)
+            if os.path.exists(preview_path):
+                try:
+                    os.remove(preview_path)
+                    logger.info("Removed preview file: %s", preview_path)
+                except OSError:
+                    logger.warning("Failed to remove preview file: %s", preview_path)
+            video.preview_file_path = None
+            video.preview_status = None
+
         db.commit()
+
+        # Notify all subscribers of this channel
+        subscriber_ids = db.execute(
+            select(UserSubscription.user_id).where(
+                UserSubscription.channel_id == video.channel_id
+            )
+        ).scalars().all()
+        for sub_user_id in subscriber_ids:
+            publish_download_complete(video_id, sub_user_id, channel_id=video.channel_id)
 
         logger.info("Download complete: %s (%s)", video.youtube_video_id, video.title)
         return {"status": "complete", "video_id": video_id}
@@ -159,6 +185,65 @@ def download_video_task(self, video_id: str, user_id: str | None = None) -> dict
             video = db.get(Video, video_id)
             if video and self.request.retries >= self.max_retries:
                 video.status = "FAILED"
+                db.commit()
+        except Exception:
+            pass
+        raise exc
+    finally:
+        db.close()
+
+
+@celery_app.task(
+    name="app.tasks.download_tasks.download_preview_task",
+    bind=True,
+    max_retries=1,
+    default_retry_delay=10,
+    autoretry_for=(RuntimeError,),
+)
+def download_preview_task(self, video_id: str, user_id: str) -> dict:
+    """Download a 360p preview for quick playback while HQ downloads."""
+    db = _get_sync_db()
+    try:
+        video = db.get(Video, video_id)
+        if not video:
+            logger.error("Video %s not found for preview", video_id)
+            return {"status": "error", "reason": "not_found"}
+
+        # Skip if HQ already complete or preview already ready
+        if video.status == "COMPLETE":
+            return {"status": "skipped", "reason": "already_complete"}
+        if video.preview_status == "READY":
+            return {"status": "skipped", "reason": "preview_already_ready"}
+
+        channel = db.get(Channel, video.channel_id)
+        if not channel:
+            logger.error("Channel %s not found for preview of video %s", video.channel_id, video_id)
+            return {"status": "error", "reason": "channel_not_found"}
+
+        video.preview_status = "DOWNLOADING"
+        db.commit()
+
+        result = download_preview(
+            youtube_video_id=video.youtube_video_id,
+            channel_slug=channel.slug,
+            video_id=video_id,
+        )
+
+        video.preview_file_path = result["file_path"]
+        video.preview_status = "READY"
+        db.commit()
+
+        publish_preview_ready(video_id, user_id)
+
+        logger.info("Preview ready: %s (%s)", video.youtube_video_id, video.title)
+        return {"status": "complete", "video_id": video_id}
+
+    except Exception as exc:
+        logger.exception("Preview download failed for video %s", video_id)
+        try:
+            video = db.get(Video, video_id)
+            if video:
+                video.preview_status = None
                 db.commit()
         except Exception:
             pass
