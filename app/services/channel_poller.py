@@ -22,9 +22,9 @@ def poll_all_channels(db: Session) -> list[str]:
     """Poll all channels that have at least one subscriber.
     Returns aggregated list of auto-download video IDs."""
     result = db.execute(
-        select(Channel.id).join(
-            UserSubscription, UserSubscription.channel_id == Channel.id
-        ).distinct()
+        select(Channel.id)
+        .join(UserSubscription, UserSubscription.channel_id == Channel.id)
+        .distinct()
     )
     channel_ids = [row[0] for row in result.all()]
     logger.info("Polling %d channels", len(channel_ids))
@@ -105,9 +105,7 @@ def poll_single_channel(channel_id: str, db: Session) -> dict:
     # Determine auto-download candidates based on subscriber tracking modes
     auto_download_ids: list[str] = []
     if new_video_ids:
-        auto_download_ids = _determine_auto_downloads(
-            new_video_ids, channel_id, db
-        )
+        auto_download_ids = _determine_auto_downloads(new_video_ids, channel_id, db)
 
     channel.last_checked_at = datetime.now(timezone.utc)
     db.commit()
@@ -171,7 +169,11 @@ def _refresh_single_channel_metadata(channel: Channel, db: Session) -> None:
 
     # Canonicalize youtube_channel_id to the UC ID
     canonical_id = channel_meta.get("channel_id")
-    if canonical_id and canonical_id.startswith("UC") and canonical_id != channel.youtube_channel_id:
+    if (
+        canonical_id
+        and canonical_id.startswith("UC")
+        and canonical_id != channel.youtube_channel_id
+    ):
         existing = db.execute(
             select(Channel).where(
                 Channel.youtube_channel_id == canonical_id,
@@ -181,7 +183,9 @@ def _refresh_single_channel_metadata(channel: Channel, db: Session) -> None:
         if not existing:
             logger.info(
                 "Canonicalizing channel %s: %s -> %s",
-                channel.id, channel.youtube_channel_id, canonical_id,
+                channel.id,
+                channel.youtube_channel_id,
+                canonical_id,
             )
             channel.youtube_channel_id = canonical_id
 
@@ -203,9 +207,7 @@ def _determine_auto_downloads(
     """Determine which new videos should be auto-downloaded based on subscriber tracking modes."""
     # Get all subscribers and their tracking modes
     sub_result = db.execute(
-        select(UserSubscription).where(
-            UserSubscription.channel_id == channel_id
-        )
+        select(UserSubscription).where(UserSubscription.channel_id == channel_id)
     )
     subscriptions = sub_result.scalars().all()
 

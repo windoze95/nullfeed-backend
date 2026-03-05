@@ -145,7 +145,9 @@ async def _get_watch_stats(user_id: str, db: AsyncSession) -> str:
             total = row[1] or 0
             watched = row[2] or 0
             rate = (watched / total * 100) if total > 0 else 0
-            lines.append(f"- {name}: {watched}/{total} watched ({rate:.0f}% completion)")
+            lines.append(
+                f"- {name}: {watched}/{total} watched ({rate:.0f}% completion)"
+            )
     except Exception:
         lines.append("- Watch statistics unavailable")
 

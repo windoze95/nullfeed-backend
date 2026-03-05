@@ -9,8 +9,12 @@ from app.models import Base
 class UserSubscription(Base):
     __tablename__ = "user_subscriptions"
 
-    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), primary_key=True)
-    channel_id: Mapped[str] = mapped_column(String(36), ForeignKey("channels.id"), primary_key=True)
+    user_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id"), primary_key=True
+    )
+    channel_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("channels.id"), primary_key=True
+    )
     subscribed_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
     )

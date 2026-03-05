@@ -4,6 +4,7 @@ Revision ID: 004_add_metadata_refreshed_at
 Revises: 003_add_preview_fields
 Create Date: 2026-03-04
 """
+
 from typing import Sequence, Union
 
 from alembic import op

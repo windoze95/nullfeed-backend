@@ -69,9 +69,10 @@ async def check_and_delete_orphan(video_id: str, db: AsyncSession) -> bool:
 
     # Delete the info JSON if it exists
     if video.file_path:
-        info_json = os.path.splitext(
-            os.path.join(settings.media_path, video.file_path)
-        )[0] + ".info.json"
+        info_json = (
+            os.path.splitext(os.path.join(settings.media_path, video.file_path))[0]
+            + ".info.json"
+        )
         if os.path.exists(info_json):
             try:
                 os.remove(info_json)

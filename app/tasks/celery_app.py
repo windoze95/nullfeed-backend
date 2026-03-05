@@ -31,4 +31,3 @@ celery_app.conf.beat_schedule = {
         "schedule": settings.metadata_refresh_interval_hours * 3600,
     },
 }
-

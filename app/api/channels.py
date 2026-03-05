@@ -89,7 +89,9 @@ async def subscribe(
             id=str(uuid.uuid4()),
             youtube_channel_id=canonical_id,
             name=resolved_name,
-            slug=_slugify(resolved_name if resolved_name != yt_channel_id else yt_channel_id),
+            slug=_slugify(
+                resolved_name if resolved_name != yt_channel_id else yt_channel_id
+            ),
             description=meta.get("description", ""),
             avatar_url=images.get("avatar_url"),
             banner_url=images.get("banner_url"),
@@ -118,9 +120,7 @@ async def subscribe(
     db.add(sub)
 
     # Create user video refs for ALL existing videos in this channel (not just COMPLETE)
-    video_result = await db.execute(
-        select(Video).where(Video.channel_id == channel.id)
-    )
+    video_result = await db.execute(select(Video).where(Video.channel_id == channel.id))
     existing_videos = video_result.scalars().all()
     for video in existing_videos:
         ref_check = await db.execute(
@@ -277,6 +277,7 @@ async def _resolve_channel(yt_channel_id: str) -> dict:
     Runs the blocking yt-dlp call in a thread to avoid blocking the event loop.
     """
     import asyncio
+
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, fetch_channel_metadata, yt_channel_id)
 
@@ -287,5 +288,6 @@ async def _resolve_channel_images(yt_channel_id: str) -> dict:
     Runs the blocking HTTP call in a thread to avoid blocking the event loop.
     """
     import asyncio
+
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, fetch_channel_images, yt_channel_id)

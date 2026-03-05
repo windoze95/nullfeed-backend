@@ -4,6 +4,7 @@ Revision ID: 002_add_tracking_mode
 Revises: 001_initial
 Create Date: 2026-03-03
 """
+
 from typing import Sequence, Union
 
 from alembic import op
@@ -18,7 +19,9 @@ depends_on: Union[str, Sequence[str], None] = None
 def upgrade() -> None:
     op.add_column(
         "user_subscriptions",
-        sa.Column("tracking_mode", sa.String(20), nullable=False, server_default="FUTURE_ONLY"),
+        sa.Column(
+            "tracking_mode", sa.String(20), nullable=False, server_default="FUTURE_ONLY"
+        ),
     )
 
     # Update existing PENDING videos that have no file on disk to CATALOGED
@@ -29,8 +32,6 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     # Revert CATALOGED videos back to PENDING
-    op.execute(
-        "UPDATE videos SET status = 'PENDING' WHERE status = 'CATALOGED'"
-    )
+    op.execute("UPDATE videos SET status = 'PENDING' WHERE status = 'CATALOGED'")
 
     op.drop_column("user_subscriptions", "tracking_mode")
