@@ -8,7 +8,7 @@ redis==5.2.1
 yt-dlp==2026.2.21
 anthropic==0.43.0
 pydantic==2.10.4
-pydantic-settings==2.7.1
+pydantic-settings==2.13.1
 python-multipart==0.0.22
 websockets==14.1
 httpx==0.28.1
