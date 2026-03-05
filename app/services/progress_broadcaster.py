@@ -26,11 +26,13 @@ def publish_download_progress(video_id: str, user_id: str, percentage: float) ->
     """Publish download progress from the Celery worker (sync)."""
     _get_sync_redis().publish(
         PROGRESS_CHANNEL,
-        json.dumps({
-            "video_id": video_id,
-            "user_id": user_id,
-            "percentage": round(percentage, 1),
-        }),
+        json.dumps(
+            {
+                "video_id": video_id,
+                "user_id": user_id,
+                "percentage": round(percentage, 1),
+            }
+        ),
     )
 
 
@@ -38,24 +40,30 @@ def publish_preview_ready(video_id: str, user_id: str) -> None:
     """Publish preview_ready event from the Celery worker (sync)."""
     _get_sync_redis().publish(
         PROGRESS_CHANNEL,
-        json.dumps({
-            "type": "preview_ready",
-            "video_id": video_id,
-            "user_id": user_id,
-        }),
+        json.dumps(
+            {
+                "type": "preview_ready",
+                "video_id": video_id,
+                "user_id": user_id,
+            }
+        ),
     )
 
 
-def publish_download_complete(video_id: str, user_id: str, channel_id: str | None = None) -> None:
+def publish_download_complete(
+    video_id: str, user_id: str, channel_id: str | None = None
+) -> None:
     """Publish download_complete event from the Celery worker (sync)."""
     _get_sync_redis().publish(
         PROGRESS_CHANNEL,
-        json.dumps({
-            "type": "download_complete",
-            "video_id": video_id,
-            "user_id": user_id,
-            "channel_id": channel_id,
-        }),
+        json.dumps(
+            {
+                "type": "download_complete",
+                "video_id": video_id,
+                "user_id": user_id,
+                "channel_id": channel_id,
+            }
+        ),
     )
 
 

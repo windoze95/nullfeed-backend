@@ -9,7 +9,11 @@ from app.models.channel import Channel
 from app.models.subscription import UserSubscription
 from app.models.user_video_ref import UserVideoRef
 from app.models.video import Video
-from app.services.download_manager import fetch_channel_images, fetch_channel_metadata, fetch_channel_videos
+from app.services.download_manager import (
+    fetch_channel_images,
+    fetch_channel_metadata,
+    fetch_channel_videos,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -18,9 +22,9 @@ def poll_all_channels(db: Session) -> list[str]:
     """Poll all channels that have at least one subscriber.
     Returns aggregated list of auto-download video IDs."""
     result = db.execute(
-        select(Channel.id).join(
-            UserSubscription, UserSubscription.channel_id == Channel.id
-        ).distinct()
+        select(Channel.id)
+        .join(UserSubscription, UserSubscription.channel_id == Channel.id)
+        .distinct()
     )
     channel_ids = [row[0] for row in result.all()]
     logger.info("Polling %d channels", len(channel_ids))
@@ -28,8 +32,8 @@ def poll_all_channels(db: Session) -> list[str]:
     all_auto_download_ids: list[str] = []
     for channel_id in channel_ids:
         try:
-            result = poll_single_channel(channel_id, db)
-            all_auto_download_ids.extend(result["auto_download_ids"])
+            poll_result = poll_single_channel(channel_id, db)
+            all_auto_download_ids.extend(poll_result["auto_download_ids"])
         except Exception:
             logger.exception("Error polling channel %s", channel_id)
 
@@ -46,13 +50,9 @@ def poll_single_channel(channel_id: str, db: Session) -> dict:
         logger.warning("Channel %s not found", channel_id)
         return {"cataloged_ids": [], "auto_download_ids": []}
 
-    # Fetch latest videos from YouTube (also returns channel metadata)
+    # Fetch latest videos from YouTube
     fetch_result = fetch_channel_videos(channel.youtube_channel_id)
     yt_videos = fetch_result["videos"]
-    channel_meta = fetch_result.get("channel_meta")
-
-    # Update channel metadata from the playlist fields
-    _update_channel_metadata(channel, channel_meta, db)
 
     cataloged_ids: list[str] = []
     new_video_ids: list[str] = []
@@ -105,9 +105,7 @@ def poll_single_channel(channel_id: str, db: Session) -> dict:
     # Determine auto-download candidates based on subscriber tracking modes
     auto_download_ids: list[str] = []
     if new_video_ids:
-        auto_download_ids = _determine_auto_downloads(
-            new_video_ids, channel_id, db
-        )
+        auto_download_ids = _determine_auto_downloads(new_video_ids, channel_id, db)
 
     channel.last_checked_at = datetime.now(timezone.utc)
     db.commit()
@@ -115,10 +113,50 @@ def poll_single_channel(channel_id: str, db: Session) -> dict:
     return {"cataloged_ids": cataloged_ids, "auto_download_ids": auto_download_ids}
 
 
-def _update_channel_metadata(channel: Channel, channel_meta: dict | None, db: Session) -> None:
-    """Update channel name, canonical youtube_channel_id, and images from yt-dlp playlist metadata."""
-    if not channel_meta:
-        return
+def refresh_stale_channel_metadata(db: Session) -> int:
+    """Refresh metadata for channels with missing or stale images.
+
+    Returns the number of channels updated.
+    """
+    from app.config import settings
+
+    staleness_threshold = datetime.now(timezone.utc) - timedelta(
+        hours=settings.metadata_refresh_interval_hours
+    )
+
+    # Channels that have at least one subscriber and need a metadata refresh:
+    # either never refreshed, or refreshed before the staleness threshold,
+    # or missing images.
+    result = db.execute(
+        select(Channel)
+        .join(UserSubscription, UserSubscription.channel_id == Channel.id)
+        .where(
+            (Channel.metadata_refreshed_at.is_(None))
+            | (Channel.metadata_refreshed_at <= staleness_threshold)
+            | (Channel.avatar_url.is_(None))
+            | (Channel.banner_url.is_(None))
+        )
+        .distinct()
+    )
+    channels = result.scalars().all()
+    logger.info("Refreshing metadata for %d channels", len(channels))
+
+    updated = 0
+    for channel in channels:
+        try:
+            _refresh_single_channel_metadata(channel, db)
+            updated += 1
+        except Exception:
+            logger.exception("Error refreshing metadata for channel %s", channel.id)
+            db.rollback()
+
+    return updated
+
+
+def _refresh_single_channel_metadata(channel: Channel, db: Session) -> None:
+    """Fetch and update metadata + images for a single channel."""
+    # Fetch channel name / canonical ID via yt-dlp
+    channel_meta = fetch_channel_metadata(channel.youtube_channel_id)
 
     # Update display name if we still have a raw ID/handle as the name
     resolved_name = channel_meta.get("name")
@@ -131,8 +169,11 @@ def _update_channel_metadata(channel: Channel, channel_meta: dict | None, db: Se
 
     # Canonicalize youtube_channel_id to the UC ID
     canonical_id = channel_meta.get("channel_id")
-    if canonical_id and canonical_id.startswith("UC") and canonical_id != channel.youtube_channel_id:
-        # Check no other channel row already owns this UC ID
+    if (
+        canonical_id
+        and canonical_id.startswith("UC")
+        and canonical_id != channel.youtube_channel_id
+    ):
         existing = db.execute(
             select(Channel).where(
                 Channel.youtube_channel_id == canonical_id,
@@ -142,20 +183,22 @@ def _update_channel_metadata(channel: Channel, channel_meta: dict | None, db: Se
         if not existing:
             logger.info(
                 "Canonicalizing channel %s: %s -> %s",
-                channel.id, channel.youtube_channel_id, canonical_id,
+                channel.id,
+                channel.youtube_channel_id,
+                canonical_id,
             )
             channel.youtube_channel_id = canonical_id
 
-    # Fetch avatar & banner from YouTube if missing or stale (>30 days)
-    images_missing = not channel.avatar_url or not channel.banner_url
-    images_stale = channel.last_checked_at is None or (datetime.utcnow() - channel.last_checked_at) > timedelta(days=30)
-    if images_missing or images_stale:
-        images = fetch_channel_images(channel.youtube_channel_id)
-        if images:
-            if images.get("avatar_url"):
-                channel.avatar_url = images["avatar_url"]
-            if images.get("banner_url"):
-                channel.banner_url = images["banner_url"]
+    # Fetch avatar & banner images
+    images = fetch_channel_images(channel.youtube_channel_id)
+    if images:
+        if images.get("avatar_url"):
+            channel.avatar_url = images["avatar_url"]
+        if images.get("banner_url"):
+            channel.banner_url = images["banner_url"]
+
+    channel.metadata_refreshed_at = datetime.now(timezone.utc)
+    db.commit()
 
 
 def _determine_auto_downloads(
@@ -164,9 +207,7 @@ def _determine_auto_downloads(
     """Determine which new videos should be auto-downloaded based on subscriber tracking modes."""
     # Get all subscribers and their tracking modes
     sub_result = db.execute(
-        select(UserSubscription).where(
-            UserSubscription.channel_id == channel_id
-        )
+        select(UserSubscription).where(UserSubscription.channel_id == channel_id)
     )
     subscriptions = sub_result.scalars().all()
 

@@ -10,9 +10,15 @@ from app.models import Base
 class Video(Base):
     __tablename__ = "videos"
 
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    youtube_video_id: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
-    channel_id: Mapped[str] = mapped_column(String(36), ForeignKey("channels.id"), nullable=False)
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    youtube_video_id: Mapped[str] = mapped_column(
+        String(255), unique=True, nullable=False
+    )
+    channel_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("channels.id"), nullable=False
+    )
     title: Mapped[str] = mapped_column(String(512), nullable=False)
     duration_seconds: Mapped[int] = mapped_column(Integer, default=0)
     uploaded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

@@ -4,6 +4,7 @@ Revision ID: 003_add_preview_fields
 Revises: 002_add_tracking_mode
 Create Date: 2026-03-04
 """
+
 from typing import Sequence, Union
 
 from alembic import op

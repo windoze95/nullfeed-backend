@@ -1,5 +1,4 @@
 from celery import Celery
-from celery.schedules import crontab
 
 from app.config import settings
 
@@ -27,5 +26,8 @@ celery_app.conf.beat_schedule = {
         "task": "app.tasks.download_tasks.poll_all_channels_task",
         "schedule": settings.check_interval_minutes * 60,
     },
+    "refresh-stale-channel-metadata": {
+        "task": "app.tasks.download_tasks.refresh_stale_channel_metadata_task",
+        "schedule": settings.metadata_refresh_interval_hours * 3600,
+    },
 }
-

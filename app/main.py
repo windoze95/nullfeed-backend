@@ -13,7 +13,12 @@ from app.config import settings
 from app.services.progress_broadcaster import start_progress_listener
 
 # Ensure data directories exist before mounting StaticFiles
-for _p in [settings.media_path, settings.db_path, settings.config_path, settings.thumbnails_path]:
+for _p in [
+    settings.media_path,
+    settings.db_path,
+    settings.config_path,
+    settings.thumbnails_path,
+]:
     os.makedirs(_p, exist_ok=True)
 
 
@@ -21,7 +26,13 @@ for _p in [settings.media_path, settings.db_path, settings.config_path, settings
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Startup
     import os
-    for path in [settings.media_path, settings.db_path, settings.config_path, settings.thumbnails_path]:
+
+    for path in [
+        settings.media_path,
+        settings.db_path,
+        settings.config_path,
+        settings.thumbnails_path,
+    ]:
         os.makedirs(path, exist_ok=True)
 
     progress_task = asyncio.create_task(start_progress_listener())

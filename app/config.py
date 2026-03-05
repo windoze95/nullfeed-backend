@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     download_concurrency: int = 2
     media_quality: str = "1080p"
     check_interval_minutes: int = 60
+    metadata_refresh_interval_hours: int = 12
 
     # File permissions
     puid: int = 1000

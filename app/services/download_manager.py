@@ -44,16 +44,21 @@ def download_video(
 
     cmd = [
         "yt-dlp",
-        "--format", format_str,
-        "--merge-output-format", "mp4",
-        "--output", output_template,
+        "--format",
+        format_str,
+        "--merge-output-format",
+        "mp4",
+        "--output",
+        output_template,
         "--write-info-json",
         "--write-thumbnail",
         "--no-playlist",
-        "--retries", "3",
+        "--retries",
+        "3",
         "--no-overwrites",
         "--newline",
-        "--downloader", "aria2c",
+        "--downloader",
+        "aria2c",
         url,
     ]
 
@@ -74,7 +79,7 @@ def download_video(
     last_line = ""
 
     try:
-        for line in process.stdout:
+        for line in process.stdout or []:
             last_line = line
             m = progress_re.search(line)
             if m and progress_callback is not None:
@@ -133,20 +138,19 @@ def download_preview(
     output_template = os.path.join(output_dir, f"{video_id}_preview.%(ext)s")
 
     # Pre-muxed formats only — no merge needed
-    format_str = (
-        "best[height<=360][ext=mp4]/"
-        "best[height<=480][ext=mp4]/"
-        "worst[ext=mp4]"
-    )
+    format_str = "best[height<=360][ext=mp4]/best[height<=480][ext=mp4]/worst[ext=mp4]"
 
     url = f"https://www.youtube.com/watch?v={youtube_video_id}"
 
     cmd = [
         "yt-dlp",
-        "--format", format_str,
-        "--output", output_template,
+        "--format",
+        format_str,
+        "--output",
+        output_template,
         "--no-playlist",
-        "--retries", "3",
+        "--retries",
+        "3",
         "--no-overwrites",
         url,
     ]
@@ -193,7 +197,9 @@ def _find_preview_file(output_dir: str, video_id: str) -> str | None:
 def _find_downloaded_file(output_dir: str, video_id: str) -> str | None:
     """Find the downloaded video file in the output directory."""
     for f in os.listdir(output_dir):
-        if f.startswith(video_id) and not f.endswith((".json", ".jpg", ".webp", ".png", ".part")):
+        if f.startswith(video_id) and not f.endswith(
+            (".json", ".jpg", ".webp", ".png", ".part")
+        ):
             return os.path.join(output_dir, f)
     return None
 
@@ -255,7 +261,8 @@ def fetch_channel_metadata(youtube_channel_id: str) -> dict:
         "yt-dlp",
         "--flat-playlist",
         "--dump-json",
-        "--playlist-items", "1",
+        "--playlist-items",
+        "1",
         url,
     ]
 
@@ -283,9 +290,16 @@ def fetch_channel_metadata(youtube_channel_id: str) -> dict:
                 "handle": handle,
             }
     except Exception as e:
-        logger.warning("Failed to fetch channel metadata for %s: %s", youtube_channel_id, e)
+        logger.warning(
+            "Failed to fetch channel metadata for %s: %s", youtube_channel_id, e
+        )
 
-    return {"name": youtube_channel_id, "description": "", "channel_id": youtube_channel_id, "handle": None}
+    return {
+        "name": youtube_channel_id,
+        "description": "",
+        "channel_id": youtube_channel_id,
+        "handle": None,
+    }
 
 
 def fetch_channel_images(youtube_channel_id: str) -> dict:
@@ -360,7 +374,8 @@ def fetch_channel_videos(youtube_channel_id: str, max_videos: int = 50) -> dict:
         "yt-dlp",
         "--flat-playlist",
         "--dump-json",
-        "--playlist-items", f"1:{max_videos}",
+        "--playlist-items",
+        f"1:{max_videos}",
         url,
     ]
 
@@ -373,12 +388,14 @@ def fetch_channel_videos(youtube_channel_id: str, max_videos: int = 50) -> dict:
                 if not line.strip():
                     continue
                 data = json.loads(line)
-                videos.append({
-                    "youtube_video_id": data.get("id", ""),
-                    "title": data.get("title", ""),
-                    "duration_seconds": int(data.get("duration") or 0),
-                    "upload_date": data.get("upload_date"),
-                })
+                videos.append(
+                    {
+                        "youtube_video_id": data.get("id", ""),
+                        "title": data.get("title", ""),
+                        "duration_seconds": int(data.get("duration") or 0),
+                        "upload_date": data.get("upload_date"),
+                    }
+                )
                 # Extract channel metadata from the first entry
                 if channel_meta is None:
                     channel_meta = {
@@ -389,8 +406,7 @@ def fetch_channel_videos(youtube_channel_id: str, max_videos: int = 50) -> dict:
                             or data.get("uploader")
                         ),
                         "channel_id": (
-                            data.get("playlist_channel_id")
-                            or data.get("channel_id")
+                            data.get("playlist_channel_id") or data.get("channel_id")
                         ),
                         "handle": data.get("playlist_uploader_id"),
                     }

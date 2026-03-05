@@ -10,7 +10,11 @@ from app.tasks.celery_app import celery_app
 from app.models.channel import Channel
 from app.models.subscription import UserSubscription
 from app.models.video import Video
-from app.services.channel_poller import poll_all_channels, poll_single_channel
+from app.services.channel_poller import (
+    poll_all_channels,
+    poll_single_channel,
+    refresh_stale_channel_metadata,
+)
 from app.services.download_manager import download_preview, download_video
 from app.services.progress_broadcaster import (
     publish_download_complete,
@@ -21,7 +25,9 @@ from app.services.progress_broadcaster import (
 logger = logging.getLogger(__name__)
 
 # Synchronous engine for Celery tasks
-_engine = create_engine(settings.sync_database_url, connect_args={"check_same_thread": False})
+_engine = create_engine(
+    settings.sync_database_url, connect_args={"check_same_thread": False}
+)
 _SessionLocal = sessionmaker(bind=_engine)
 
 
@@ -82,6 +88,24 @@ def poll_channel_task(self, channel_id: str) -> dict:
 
 
 @celery_app.task(
+    name="app.tasks.download_tasks.refresh_stale_channel_metadata_task",
+    bind=True,
+    max_retries=0,
+)
+def refresh_stale_channel_metadata_task(self) -> dict:
+    """Periodic task: refresh channel metadata (name, avatar, banner) for stale channels."""
+    db = _get_sync_db()
+    try:
+        updated = refresh_stale_channel_metadata(db)
+        return {"status": "ok", "updated": updated}
+    except Exception:
+        logger.exception("Error in refresh_stale_channel_metadata_task")
+        return {"status": "error"}
+    finally:
+        db.close()
+
+
+@celery_app.task(
     name="app.tasks.download_tasks.download_video_task",
     bind=True,
     max_retries=3,
@@ -108,7 +132,9 @@ def download_video_task(self, video_id: str, user_id: str | None = None) -> dict
 
         channel = db.get(Channel, video.channel_id)
         if not channel:
-            logger.error("Channel %s not found for video %s", video.channel_id, video_id)
+            logger.error(
+                "Channel %s not found for video %s", video.channel_id, video_id
+            )
             return {"status": "error", "reason": "channel_not_found"}
 
         # Remove old file if re-downloading (e.g. codec change)
@@ -125,6 +151,7 @@ def download_video_task(self, video_id: str, user_id: str | None = None) -> dict
         # Build progress callback if we know who triggered the download
         progress_cb = None
         if user_id:
+
             def progress_cb(percentage: float) -> None:
                 publish_download_progress(video_id, user_id, percentage)
 
@@ -167,13 +194,19 @@ def download_video_task(self, video_id: str, user_id: str | None = None) -> dict
         db.commit()
 
         # Notify all subscribers of this channel
-        subscriber_ids = db.execute(
-            select(UserSubscription.user_id).where(
-                UserSubscription.channel_id == video.channel_id
+        subscriber_ids = (
+            db.execute(
+                select(UserSubscription.user_id).where(
+                    UserSubscription.channel_id == video.channel_id
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         for sub_user_id in subscriber_ids:
-            publish_download_complete(video_id, sub_user_id, channel_id=video.channel_id)
+            publish_download_complete(
+                video_id, sub_user_id, channel_id=video.channel_id
+            )
 
         logger.info("Download complete: %s (%s)", video.youtube_video_id, video.title)
         return {"status": "complete", "video_id": video_id}
@@ -217,7 +250,11 @@ def download_preview_task(self, video_id: str, user_id: str) -> dict:
 
         channel = db.get(Channel, video.channel_id)
         if not channel:
-            logger.error("Channel %s not found for preview of video %s", video.channel_id, video_id)
+            logger.error(
+                "Channel %s not found for preview of video %s",
+                video.channel_id,
+                video_id,
+            )
             return {"status": "error", "reason": "channel_not_found"}
 
         video.preview_status = "DOWNLOADING"
