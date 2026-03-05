@@ -5,7 +5,7 @@ alembic==1.14.1
 aiosqlite==0.20.0
 celery==5.4.0
 redis==5.2.1
-yt-dlp==2026.2.21
+yt-dlp==2026.3.3
 anthropic==0.43.0
 pydantic==2.10.4
 pydantic-settings==2.7.1
