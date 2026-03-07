@@ -5,7 +5,7 @@
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688.svg)](https://fastapi.tiangolo.com)
 [![Docker](https://img.shields.io/badge/docker-ready-2496ED.svg)](https://www.docker.com/)
-[![License: Private](https://img.shields.io/badge/license-private-red.svg)](#license)
+[![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
 
 NullFeed is a self-hosted YouTube media center that wraps **yt-dlp** with a polished, multi-user experience. The backend runs as a single Docker container and provides automated channel subscriptions, download management, media streaming with HTTP range requests, AI-powered recommendations via Claude, and real-time WebSocket updates -- all consumed by the NullFeed Flutter app on iOS and tvOS.
 
@@ -66,7 +66,7 @@ NullFeed is a self-hosted YouTube media center that wraps **yt-dlp** with a poli
 1. **Clone the repository:**
 
    ```bash
-   git clone https://github.com/nullfeed/nullfeed-backend.git
+   git clone https://github.com/windoze95/nullfeed-backend.git
    cd nullfeed-backend
    ```
 
@@ -305,6 +305,17 @@ nullfeed-backend/
 
 ---
 
+## Related Repositories
+
+| Repository | Description |
+|------------|-------------|
+| **nullfeed-backend** (this repo) | **Python/FastAPI backend -- Docker-based server with yt-dlp, Celery, Redis, and SQLite** |
+| [nullfeed-flutter](https://github.com/windoze95/nullfeed-flutter) | Flutter client for iOS |
+| [nullfeed-tvos](https://github.com/windoze95/nullfeed-tvos) | Native Swift/SwiftUI tvOS app |
+| [nullfeed-demo](https://github.com/windoze95/nullfeed-demo) | FastAPI demo server with Creative Commons content for App Store review |
+
+---
+
 ## License
 
-Private -- All rights reserved.
+This project is licensed under the [GNU General Public License v3.0](LICENSE).
