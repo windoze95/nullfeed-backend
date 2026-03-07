@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import shutil
 import subprocess
 import json
 import time
@@ -227,7 +228,12 @@ def _copy_thumbnail(output_dir: str, video_id: str) -> None:
         src = os.path.join(output_dir, f"{video_id}.{ext}")
         if os.path.exists(src):
             if ext == "jpg":
-                os.link(src, dest) if not os.path.exists(dest) else None
+                if not os.path.exists(dest):
+                    try:
+                        os.link(src, dest)
+                    except OSError:
+                        # Fallback to copy if hardlink fails (e.g., different filesystems in Docker)
+                        shutil.copy2(src, dest)
             else:
                 # Convert to jpg using ffmpeg
                 subprocess.run(
