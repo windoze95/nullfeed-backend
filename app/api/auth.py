@@ -1,6 +1,7 @@
 import hashlib
 import secrets
 import uuid
+import base64
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy import select
@@ -17,7 +18,22 @@ _sessions: dict[str, str] = {}
 
 
 def _hash_pin(pin: str) -> str:
-    return hashlib.sha256(pin.encode()).hexdigest()
+    """Hash PIN using scrypt with a random salt for secure storage."""
+    salt = secrets.token_bytes(32)
+    key = hashlib.pbkdf2_hmac(sha256, pin.encode(), salt, 100000)
+    return base64.b64encode(salt + key).decode()
+
+
+def _verify_pin(pin: str, pin_hash: str) -> bool:
+    """Verify PIN against stored hash using the same salt."""
+    try:
+        data = base64.b64decode(pin_hash.encode())
+        salt = data[:32]
+        stored_key = data[32:]
+        key = hashlib.pbkdf2_hmac(sha256, pin.encode(), salt, 100000)
+        return secrets.compare_digest(key, stored_key)
+    except Exception:
+        return False
 
 
 async def get_current_user(
@@ -62,7 +78,7 @@ async def select_profile(
     if user.pin_hash:
         if not body.pin:
             raise HTTPException(status_code=403, detail="PIN required")
-        if _hash_pin(body.pin) != user.pin_hash:
+        if not _verify_pin(body.pin, user.pin_hash):
             raise HTTPException(status_code=403, detail="Incorrect PIN")
 
     token = secrets.token_urlsafe(32)
@@ -91,3 +107,4 @@ async def create_profile(
     await db.commit()
     await db.refresh(user)
     return UserProfile.model_validate(user)
+
