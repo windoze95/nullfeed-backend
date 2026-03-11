@@ -17,11 +17,18 @@ def build_range_response(file_path: str, range_header: str) -> Response:
     stat = os.stat(file_path)
 
     # Parse range header: "bytes=start-end"
+    # Handles both normal ranges (e.g. "bytes=0-1023") and suffix-byte-ranges
+    # (e.g. "bytes=-500", meaning the last 500 bytes).
     range_spec = range_header.replace("bytes=", "").strip()
     parts = range_spec.split("-")
 
-    start = int(parts[0]) if parts[0] else 0
-    end = int(parts[1]) if len(parts) > 1 and parts[1] else file_size - 1
+    if not parts[0] and len(parts) > 1 and parts[1]:
+        # Suffix-byte-range: bytes=-N means the last N bytes
+        start = max(0, file_size - int(parts[1]))
+        end = file_size - 1
+    else:
+        start = int(parts[0]) if parts[0] else 0
+        end = int(parts[1]) if len(parts) > 1 and parts[1] else file_size - 1
 
     # Clamp values
     start = max(0, start)
