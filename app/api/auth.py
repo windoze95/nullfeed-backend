@@ -76,9 +76,14 @@ async def create_profile(
     db: AsyncSession = Depends(get_db),
 ) -> UserProfile:
     # Check if any users exist; first user becomes admin automatically.
+    # before
     result = await db.execute(select(User))
     existing = result.scalars().all()
     is_first_user = len(existing) == 0
+
+    #after
+    result = await db.execute(select(User).limit(1))
+    is_first_user = result.scalars().scalar_one_or_none() is None
 
     user = User(
         id=str(uuid.uuid4()),
