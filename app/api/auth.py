@@ -2,7 +2,7 @@ import hashlib
 import secrets
 import uuid
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,15 +19,19 @@ _sessions: dict[str, str] = {}
 def _hash_pin(pin: str) -> str:
     return hashlib.sha256(pin.encode()).hexdigest()
 
-
 async def get_current_user(
-    x_user_token: str | None = Header(None),
+    request: Request, 
     db: AsyncSession = Depends(get_db),
 ) -> User:
-    """Resolve the current user from the X-User-Token header."""
-    if not x_user_token:
-        raise HTTPException(status_code=401, detail="Missing X-User-Token header")
-    user_id = _sessions.get(x_user_token)
+    """Resolve the current user from the session cookie."""
+    # Extract token from the cookie instead of the Header
+    token = request.cookies.get("session_token") 
+    
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing session cookie")
+        
+    user_id = _sessions.get(token)
+
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid or expired session token")
     result = await db.execute(select(User).where(User.id == user_id))
@@ -52,6 +56,7 @@ async def list_profiles(db: AsyncSession = Depends(get_db)) -> list[UserProfile]
 @router.post("/select", response_model=UserSession)
 async def select_profile(
     body: UserSelect,
+    response: Response, 
     db: AsyncSession = Depends(get_db),
 ) -> UserSession:
     result = await db.execute(select(User).where(User.id == body.user_id))
@@ -67,6 +72,13 @@ async def select_profile(
 
     token = secrets.token_urlsafe(32)
     _sessions[token] = user.id
+    response.set_cookie(
+        key="session_token",
+        value=token,
+        httponly=True,
+        secure=True,
+        samesite="lax"
+    )
     return UserSession(user=UserProfile.model_validate(user), token=token)
 
 

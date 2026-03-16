@@ -1,7 +1,7 @@
 import os
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import FileResponse
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -172,14 +172,15 @@ async def request_preview(
 
 
 @router.get("/{video_id}/preview-stream")
-async def stream_preview(
+async def preview_stream(
     video_id: str,
-    token: str | None = None,
-    x_user_token: str | None = Header(None),
+    request: Request, # Read the incoming HTTP request
     db: AsyncSession = Depends(get_db),
     range_header: str | None = Header(None, alias="Range"),
 ):
-    auth_token = token or x_user_token
+    # Extract the token from the cookie (assuming the cookie is named "access_token")
+    auth_token = request.cookies.get("access_token")
+    
     if not auth_token or not validate_token(auth_token):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
@@ -213,13 +214,13 @@ async def stream_preview(
 @router.get("/{video_id}/stream")
 async def stream_video(
     video_id: str,
-    token: str | None = None,
-    x_user_token: str | None = Header(None),
+    request: Request, # Read the incoming HTTP request
     db: AsyncSession = Depends(get_db),
     range_header: str | None = Header(None, alias="Range"),
 ):
-    # Accept auth via query param (for <video> element) or header
-    auth_token = token or x_user_token
+    # Extract the token from the cookie (assuming the cookie is named "access_token")
+    auth_token = request.cookies.get("access_token")
+    
     if not auth_token or not validate_token(auth_token):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
