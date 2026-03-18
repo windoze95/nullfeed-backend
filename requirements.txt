@@ -1,6 +1,6 @@
 fastapi==0.135.1
 uvicorn[standard]==0.34.0
-sqlalchemy==2.0.36
+sqlalchemy==2.0.48
 alembic==1.14.1
 aiosqlite==0.20.0
 celery==5.4.0
