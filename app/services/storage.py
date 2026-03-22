@@ -14,7 +14,8 @@ logger = logging.getLogger(__name__)
 async def check_and_delete_orphan(video_id: str, db: AsyncSession) -> bool:
     """
     Check if a video has any remaining active references.
-    If not, delete the physical file from disk and clean up thumbnails.
+    If not, delete the physical file from disk, clean up thumbnails,
+    and reset the Video record so it can be re-downloaded if needed.
     Returns True if the file was deleted.
     """
     # Count active (non-removed) references
@@ -78,6 +79,16 @@ async def check_and_delete_orphan(video_id: str, db: AsyncSession) -> bool:
                 os.remove(info_json)
             except OSError:
                 pass
+
+    # Reset the Video record so it appears as not-downloaded.
+    # Without this, the status remains "COMPLETE" and file_path still points
+    # to the deleted file. New UserVideoRef associations created later would
+    # try to stream a missing file (404) and auto-download logic would skip it
+    # because it looks already complete.
+    video.status = "CATALOGED"
+    video.file_path = None
+    video.file_size_bytes = 0
+    await db.commit()
 
     logger.info(
         "Orphan cleanup complete for video %s (%s)",
