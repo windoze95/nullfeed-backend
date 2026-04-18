@@ -79,6 +79,13 @@ async def check_and_delete_orphan(video_id: str, db: AsyncSession) -> bool:
             except OSError:
                 pass
 
+    # Update the video record to reflect that files have been removed
+    video.status = "ORPHANED"
+    video.file_path = None
+    video.preview_file_path = None
+    video.preview_status = None
+    await db.commit()
+
     logger.info(
         "Orphan cleanup complete for video %s (%s)",
         video_id,

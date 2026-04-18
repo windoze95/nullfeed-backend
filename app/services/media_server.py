@@ -16,12 +16,18 @@ def build_range_response(file_path: str, range_header: str) -> Response:
     file_size = os.path.getsize(file_path)
     stat = os.stat(file_path)
 
-    # Parse range header: "bytes=start-end"
+    # Parse range header: "bytes=start-end" or suffix form "bytes=-N"
     range_spec = range_header.replace("bytes=", "").strip()
-    parts = range_spec.split("-")
+    parts = range_spec.split("-", 1)
 
-    start = int(parts[0]) if parts[0] else 0
-    end = int(parts[1]) if len(parts) > 1 and parts[1] else file_size - 1
+    if not parts[0] and len(parts) > 1 and parts[1]:
+        # Suffix-byte-range: bytes=-N means last N bytes
+        suffix_length = int(parts[1])
+        start = max(0, file_size - suffix_length)
+        end = file_size - 1
+    else:
+        start = int(parts[0]) if parts[0] else 0
+        end = int(parts[1]) if len(parts) > 1 and parts[1] else file_size - 1
 
     # Clamp values
     start = max(0, start)

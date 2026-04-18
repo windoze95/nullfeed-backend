@@ -213,12 +213,16 @@ def download_video_task(self, video_id: str, user_id: str | None = None) -> dict
 
     except Exception as exc:
         logger.exception("Download failed for video %s", video_id)
-        # Mark as FAILED if we've exhausted retries
         try:
             video = db.get(Video, video_id)
-            if video and self.request.retries >= self.max_retries:
-                video.status = "FAILED"
-                db.commit()
+            if video:
+                # Non-retriable exceptions (not RuntimeError) should fail immediately.
+                # RuntimeError is handled by Celery autoretry; all others set FAILED now
+                # so the video isn't stuck in DOWNLOADING indefinitely.
+                is_retriable = isinstance(exc, RuntimeError)
+                if not is_retriable or self.request.retries >= self.max_retries:
+                    video.status = "FAILED"
+                    db.commit()
         except Exception:
             pass
         raise exc
