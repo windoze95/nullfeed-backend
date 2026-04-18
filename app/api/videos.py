@@ -144,6 +144,21 @@ async def cancel_download(
     if video.status not in ("PENDING", "DOWNLOADING"):
         return {"detail": "Not in progress", "video_id": video_id}
 
+    # Only revert to CATALOGED if no other users have an active ref to this video.
+    # Cancelling one user's download should not affect downloads in progress for others.
+    other_refs_result = await db.execute(
+        select(UserVideoRef).where(
+            UserVideoRef.video_id == video_id,
+            UserVideoRef.user_id != user.id,
+            UserVideoRef.removed_at.is_(None),
+        )
+    )
+    other_active_refs = other_refs_result.scalars().all()
+
+    if other_active_refs:
+        # Other users are still watching this video — don't touch the global status.
+        return {"detail": "Download kept active for other subscribers", "video_id": video_id}
+
     video.status = "CATALOGED"
     await db.commit()
 
