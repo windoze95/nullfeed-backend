@@ -213,10 +213,13 @@ def download_video_task(self, video_id: str, user_id: str | None = None) -> dict
 
     except Exception as exc:
         logger.exception("Download failed for video %s", video_id)
-        # Mark as FAILED if we've exhausted retries
+        # Mark as FAILED if we've exhausted retries or exception won't trigger retry
         try:
             video = db.get(Video, video_id)
-            if video and self.request.retries >= self.max_retries:
+            if video and (
+                self.request.retries >= self.max_retries
+                or not isinstance(exc, RuntimeError)
+            ):
                 video.status = "FAILED"
                 db.commit()
         except Exception:
