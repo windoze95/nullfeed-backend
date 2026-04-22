@@ -144,6 +144,32 @@ async def cancel_download(
     if video.status not in ("PENDING", "DOWNLOADING"):
         return {"detail": "Not in progress", "video_id": video_id}
 
+    # Check if other users still have active references to this video
+    refs_result = await db.execute(
+        select(UserVideoRef).where(
+            UserVideoRef.video_id == video_id,
+            UserVideoRef.user_id != user.id,
+            UserVideoRef.removed_at.is_(None),
+        )
+    )
+    other_refs = refs_result.scalars().all()
+
+    if other_refs:
+        # Other users still want this video — only remove current user's ref
+        ref_result = await db.execute(
+            select(UserVideoRef).where(
+                UserVideoRef.user_id == user.id,
+                UserVideoRef.video_id == video_id,
+                UserVideoRef.removed_at.is_(None),
+            )
+        )
+        ref = ref_result.scalar_one_or_none()
+        if ref:
+            ref.removed_at = datetime.now(timezone.utc)
+        await db.commit()
+        return {"detail": "Download cancelled for current user only", "video_id": video_id}
+
+    # No other references — safe to cancel globally
     video.status = "CATALOGED"
     await db.commit()
 
