@@ -141,6 +141,17 @@ async def cancel_download(
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
 
+    # Verify the requesting user owns this download
+    ref_result = await db.execute(
+        select(UserVideoRef).where(
+            UserVideoRef.user_id == user.id,
+            UserVideoRef.video_id == video_id,
+            UserVideoRef.removed_at.is_(None),
+        )
+    )
+    if not ref_result.scalar_one_or_none():
+        raise HTTPException(status_code=403, detail="Not your download")
+
     if video.status not in ("PENDING", "DOWNLOADING"):
         return {"detail": "Not in progress", "video_id": video_id}
 
