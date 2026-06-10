@@ -211,12 +211,15 @@ def download_video_task(self, video_id: str, user_id: str | None = None) -> dict
         logger.info("Download complete: %s (%s)", video.youtube_video_id, video.title)
         return {"status": "complete", "video_id": video_id}
 
+    except RuntimeError:
+        # RuntimeError triggers autoretry; let Celery handle retry logic
+        raise
     except Exception as exc:
         logger.exception("Download failed for video %s", video_id)
-        # Mark as FAILED if we've exhausted retries
+        # Non-RuntimeError exceptions won't be retried, mark FAILED immediately
         try:
             video = db.get(Video, video_id)
-            if video and self.request.retries >= self.max_retries:
+            if video:
                 video.status = "FAILED"
                 db.commit()
         except Exception:
