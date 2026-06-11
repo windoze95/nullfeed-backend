@@ -17,6 +17,7 @@ class VideoOut(BaseModel):
     thumbnail_url: str | None = None
     watch_position_seconds: int = 0
     is_watched: bool = False
+    last_watched_at: datetime | None = None
     channel_name: str = ""
 
     model_config = {"from_attributes": True}

@@ -142,6 +142,13 @@ def download_video_task(
         if video.status == "DOWNLOADING":
             return {"status": "skipped", "reason": "already_downloading"}
 
+        # Guard: a cancel is still being confirmed; finish the hand-off here
+        # (the worker that owned the download has already exited).
+        if video.status == "CANCELLING":
+            video.status = "CATALOGED"
+            db.commit()
+            return {"status": "skipped", "reason": "cancelled"}
+
         # Guard: skip CATALOGED videos (they must be explicitly triggered)
         if video.status == "CATALOGED":
             return {"status": "skipped", "reason": "cataloged"}
@@ -237,7 +244,11 @@ def download_video_task(
             )
             for sub_user_id in subscriber_ids:
                 publish_download_complete(
-                    video_id, sub_user_id, channel_id=video.channel_id
+                    video_id,
+                    sub_user_id,
+                    channel_id=video.channel_id,
+                    title=video.title,
+                    youtube_video_id=video.youtube_video_id,
                 )
         except Exception:
             logger.exception(
@@ -248,21 +259,38 @@ def download_video_task(
         return {"status": "complete", "video_id": video_id}
 
     except DownloadCancelled:
-        # Cancel endpoint already reset the status (e.g. to CATALOGED);
-        # partial files were cleaned up by the download loop. No retry.
+        # Partial files were cleaned up by the download loop. Confirm the
+        # cancel hand-off: CANCELLING -> CATALOGED re-enables re-downloads.
         logger.info("Download cancelled for video %s", video_id)
+        try:
+            db.rollback()
+            video = db.get(Video, video_id)
+            if video and video.status == "CANCELLING":
+                video.status = "CATALOGED"
+                db.commit()
+        except Exception:
+            logger.exception("Could not confirm cancel for video %s", video_id)
         return {"status": "cancelled", "video_id": video_id}
 
     except Exception as exc:
         logger.exception("Download failed for video %s", video_id)
-        # Mark as FAILED if we've exhausted retries
+        # A retry must pass the already-downloading guard above, so reset the
+        # status to PENDING when another attempt is coming; otherwise this is
+        # terminal (retries exhausted, or an exception type we never retry)
+        # and the video is marked FAILED.
+        will_retry = (
+            isinstance(exc, RuntimeError) and self.request.retries < self.max_retries
+        )
         try:
+            db.rollback()
             video = db.get(Video, video_id)
-            if video and self.request.retries >= self.max_retries:
-                video.status = "FAILED"
+            if video and video.status == "DOWNLOADING":
+                video.status = "PENDING" if will_retry else "FAILED"
                 db.commit()
         except Exception:
-            pass
+            logger.exception(
+                "Could not update status after failed download of %s", video_id
+            )
         raise exc
     finally:
         db.close()

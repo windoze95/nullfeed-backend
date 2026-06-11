@@ -51,7 +51,11 @@ def publish_preview_ready(video_id: str, user_id: str) -> None:
 
 
 def publish_download_complete(
-    video_id: str, user_id: str, channel_id: str | None = None
+    video_id: str,
+    user_id: str,
+    channel_id: str | None = None,
+    title: str | None = None,
+    youtube_video_id: str | None = None,
 ) -> None:
     """Publish download_complete event from the Celery worker (sync)."""
     _get_sync_redis().publish(
@@ -62,6 +66,8 @@ def publish_download_complete(
                 "video_id": video_id,
                 "user_id": user_id,
                 "channel_id": channel_id,
+                "title": title,
+                "youtube_video_id": youtube_video_id,
             }
         ),
     )
@@ -93,8 +99,9 @@ async def start_progress_listener() -> None:
                     )
                 elif msg_type == "download_complete":
                     data = {"video_id": payload["video_id"]}
-                    if payload.get("channel_id"):
-                        data["channel_id"] = payload["channel_id"]
+                    for key in ("channel_id", "title", "youtube_video_id"):
+                        if payload.get(key):
+                            data[key] = payload[key]
                     await broadcast_to_user(
                         payload["user_id"],
                         {

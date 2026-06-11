@@ -63,6 +63,11 @@ def build_media_response(file_path: str, range_header: str | None = None) -> Res
     )
 
 
+def _is_ascii_digits(value: str) -> bool:
+    """True when value is one or more ASCII digits (safe to int())."""
+    return bool(value) and value.isascii() and value.isdigit()
+
+
 def _parse_range(range_header: str, file_size: int) -> tuple[int, int] | None:
     """Parse a Range header into an inclusive (start, end) byte tuple.
 
@@ -82,15 +87,17 @@ def _parse_range(range_header: str, file_size: int) -> tuple[int, int] | None:
     end_s = end_s.strip()
 
     if start_s:
-        # Open-ended "N-" or bounded "N-M".
-        if not start_s.isdigit():
+        # Open-ended "N-" or bounded "N-M". ASCII check required: isdigit()
+        # alone accepts non-ASCII digits (e.g. latin-1 '\xb2') that int()
+        # rejects, which would turn a malformed header into a 500.
+        if not _is_ascii_digits(start_s):
             return None
         start = int(start_s)
         if start >= file_size:
             return None
         if not end_s:
             return start, file_size - 1
-        if not end_s.isdigit():
+        if not _is_ascii_digits(end_s):
             return None
         end = int(end_s)
         if end < start:
@@ -98,7 +105,7 @@ def _parse_range(range_header: str, file_size: int) -> tuple[int, int] | None:
         return start, min(end, file_size - 1)
 
     # Suffix range "-N": the last N bytes of the file.
-    if not end_s or not end_s.isdigit():
+    if not _is_ascii_digits(end_s):
         return None
     suffix_length = int(end_s)
     if suffix_length == 0:

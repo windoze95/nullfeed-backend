@@ -102,6 +102,7 @@ async def get_video(
         thumbnail_url=f"/data/thumbnails/{video.youtube_video_id}.jpg",
         watch_position_seconds=ref.watch_position_seconds if ref else 0,
         is_watched=ref.is_watched if ref else False,
+        last_watched_at=ref.last_watched_at if ref else None,
         metadata_json=video.metadata_json,
         channel_name=channel.name if channel else "",
         channel_slug=channel.slug if channel else "",
@@ -122,6 +123,10 @@ async def trigger_download(
 
     if video.status in ("PENDING", "DOWNLOADING"):
         raise HTTPException(status_code=409, detail="Download already in progress")
+    if video.status == "CANCELLING":
+        raise HTTPException(
+            status_code=409, detail="Previous download is still being cancelled"
+        )
 
     # CATALOGED, FAILED, COMPLETE — (re-)enqueue. Keep file_path/file_size_bytes
     # intact so the existing file stays playable until the worker replaces it.
@@ -145,10 +150,20 @@ async def cancel_download(
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
 
+    if video.status == "CANCELLING":
+        # Escape hatch: a second cancel force-clears a cancel whose worker
+        # never confirmed (e.g. the worker died mid-download).
+        video.status = "CATALOGED"
+        await db.commit()
+        return {"detail": "Download cancelled", "video_id": video_id}
+
     if video.status not in ("PENDING", "DOWNLOADING"):
         return {"detail": "Not in progress", "video_id": video_id}
 
-    video.status = "CATALOGED"
+    # PENDING tasks never started — the worker's start guard skips CATALOGED.
+    # An in-flight download moves to CANCELLING until the worker confirms it
+    # has killed yt-dlp and cleaned up, blocking a concurrent re-download.
+    video.status = "CATALOGED" if video.status == "PENDING" else "CANCELLING"
     await db.commit()
 
     return {"detail": "Download cancelled", "video_id": video_id}
@@ -241,16 +256,27 @@ async def update_progress(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    exists = await db.execute(select(Video.id).where(Video.id == video_id))
-    if exists.scalar_one_or_none() is None:
+    result = await db.execute(
+        select(Video.duration_seconds).where(Video.id == video_id)
+    )
+    row = result.one_or_none()
+    if row is None:
         raise HTTPException(status_code=404, detail="Video not found")
+    duration = row[0]
+
+    # The client only reports positions; watched state is derived here. A
+    # position within the last 5% (or 30s) of the video marks it watched;
+    # restarting a watched video makes it in-progress again.
+    is_watched = bool(body.is_watched)
+    if not is_watched and duration and duration > 0:
+        is_watched = body.position_seconds >= max(duration * 0.95, duration - 30)
 
     now = utcnow_naive()
     stmt = sqlite_insert(UserVideoRef).values(
         user_id=user.id,
         video_id=video_id,
         watch_position_seconds=body.position_seconds,
-        is_watched=body.is_watched,
+        is_watched=is_watched,
         added_at=now,
         removed_at=None,
         last_watched_at=now,
@@ -260,7 +286,7 @@ async def update_progress(
         index_elements=["user_id", "video_id"],
         set_={
             "watch_position_seconds": body.position_seconds,
-            "is_watched": body.is_watched,
+            "is_watched": is_watched,
             "removed_at": None,
             "last_watched_at": now,
         },

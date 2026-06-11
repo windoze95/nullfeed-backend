@@ -254,7 +254,9 @@ async def get_suggestions(handle: str) -> list[dict[str, Any]]:
             data = await asyncio.to_thread(
                 _run_yt_dlp_json,
                 _channel_url(normalized, "/playlists"),
-                [],
+                # Only the first few playlists are fetched below; bounding the
+                # tab dump keeps this fast for channels with thousands.
+                ["--playlist-items", f"1-{MAX_PLAYLISTS}"],
                 SUGGESTIONS_CALL_TIMEOUT_SECONDS,
             )
             for entry in (data.get("entries") or [])[:MAX_PLAYLISTS]:

@@ -215,10 +215,6 @@ async def create_profile(
     body: UserCreate,
     db: AsyncSession = Depends(get_db),
 ) -> UserProfile:
-    # First user ever created becomes admin; everyone else does not.
-    result = await db.execute(select(func.count()).select_from(User))
-    is_first_user = result.scalar_one() == 0
-
     user_id = str(uuid.uuid4())
     display_name = body.display_name
     avatar_url = body.avatar_url
@@ -243,6 +239,12 @@ async def create_profile(
 
     if not display_name:
         raise HTTPException(status_code=422, detail="display_name is required")
+
+    # First user ever created becomes admin; everyone else does not. Counted
+    # here — after the (slow) YouTube resolve — so a concurrent create during
+    # that window cannot also observe an empty table and mint a second admin.
+    result = await db.execute(select(func.count()).select_from(User))
+    is_first_user = result.scalar_one() == 0
 
     user = User(
         id=user_id,

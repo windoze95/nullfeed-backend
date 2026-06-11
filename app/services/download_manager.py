@@ -2,6 +2,7 @@ import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import json
 import time
@@ -16,6 +17,14 @@ logger = logging.getLogger(__name__)
 
 class DownloadCancelled(Exception):
     """Raised when an in-flight download is cancelled (e.g. via the API)."""
+
+
+def _kill_process_group(process: subprocess.Popen) -> None:
+    """Kill a subprocess and its children (yt-dlp delegates to aria2c)."""
+    try:
+        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    except (OSError, ProcessLookupError):
+        process.kill()
 
 
 def download_video(
@@ -81,6 +90,7 @@ def download_video(
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,  # line-buffered for more frequent progress updates
+        start_new_session=True,  # own process group so cancel kills aria2c too
     )
 
     # yt-dlp native: [download]  45.2% ...
@@ -100,7 +110,7 @@ def download_video(
                 if now - last_cancel_check_time >= 5.0:
                     last_cancel_check_time = now
                     if cancel_check():
-                        process.kill()
+                        _kill_process_group(process)
                         process.wait()
                         _cleanup_partial_files(output_dir, youtube_video_id)
                         raise DownloadCancelled(
@@ -117,7 +127,8 @@ def download_video(
 
         process.wait(timeout=3600)
     except subprocess.TimeoutExpired:
-        process.kill()
+        _kill_process_group(process)
+        process.wait()
         raise RuntimeError(f"yt-dlp timed out for {youtube_video_id}")
 
     if process.returncode != 0:

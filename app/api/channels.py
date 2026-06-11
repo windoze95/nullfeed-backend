@@ -450,6 +450,7 @@ async def list_channel_videos(
             thumbnail_url=f"/data/thumbnails/{v.youtube_video_id}.jpg",
             watch_position_seconds=ref.watch_position_seconds if ref else 0,
             is_watched=ref.is_watched if ref else False,
+            last_watched_at=ref.last_watched_at if ref else None,
         )
         items.append(item)
 
@@ -457,10 +458,19 @@ async def list_channel_videos(
 
 
 def _extract_channel_id(url: str) -> str | None:
-    """Best-effort extraction of a YouTube channel ID from a URL."""
+    """Best-effort extraction of a YouTube channel ID from a URL or handle."""
+    url = url.strip()
+
+    # Bare handle ("@mkbhd") or raw UC channel id — e.g. from AI
+    # recommendations, which store handles for one-tap subscribe.
+    if re.fullmatch(r"@[a-zA-Z0-9_.-]+", url):
+        return url
+    if re.fullmatch(r"UC[a-zA-Z0-9_-]{10,}", url):
+        return url
+
     patterns = [
         r"youtube\.com/channel/([a-zA-Z0-9_-]+)",
-        r"youtube\.com/@([a-zA-Z0-9_.-]+)",
+        r"youtube\.com/(@[a-zA-Z0-9_.-]+)",
         r"youtube\.com/c/([a-zA-Z0-9_.-]+)",
         r"youtube\.com/user/([a-zA-Z0-9_.-]+)",
     ]

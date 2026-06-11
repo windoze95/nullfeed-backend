@@ -13,6 +13,10 @@ from app.api import auth, channels, discover, feed, health, videos, websocket, y
 from app.config import settings
 from app.services.progress_broadcaster import start_progress_listener
 
+# Self-hosters debug from container logs; surface app-level INFO messages
+# (graceful degradation in the YouTube importer, poller skips, etc.).
+logging.basicConfig(level=logging.INFO)
+
 logger = logging.getLogger(__name__)
 
 
