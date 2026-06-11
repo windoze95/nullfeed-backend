@@ -2,7 +2,9 @@ import json
 import logging
 from collections import defaultdict
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
+
+from app.api.auth import validate_token
 
 router = APIRouter(tags=["websocket"])
 logger = logging.getLogger(__name__)
@@ -12,8 +14,20 @@ _connections: dict[str, set[WebSocket]] = defaultdict(set)
 
 
 @router.websocket("/ws/{user_id}")
-async def websocket_endpoint(websocket: WebSocket, user_id: str):
+async def websocket_endpoint(
+    websocket: WebSocket,
+    user_id: str,
+    token: str | None = Query(None),
+) -> None:
     await websocket.accept()
+
+    # The token must resolve to a session belonging to this user.
+    token_user_id = await validate_token(token) if token else None
+    if token_user_id != user_id:
+        logger.info("WebSocket rejected (bad token): user=%s", user_id)
+        await websocket.close(code=4401)
+        return
+
     _connections[user_id].add(websocket)
     logger.info("WebSocket connected: user=%s", user_id)
 
@@ -24,6 +38,8 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
             if data == "ping":
                 await websocket.send_text("pong")
     except WebSocketDisconnect:
+        pass
+    finally:
         _connections[user_id].discard(websocket)
         if not _connections[user_id]:
             del _connections[user_id]
@@ -32,18 +48,18 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
 
 async def broadcast_to_user(user_id: str, event: dict) -> None:
     """Send an event to all WebSocket connections for a specific user."""
-    sockets = _connections.get(user_id, set())
-    dead: list[WebSocket] = []
+    sockets = _connections.get(user_id)
+    if not sockets:
+        return
     message = json.dumps(event)
 
-    for ws in sockets:
+    # Iterate over a copy: sends can yield to the event loop, during which
+    # connects/disconnects may mutate the underlying set.
+    for ws in list(sockets):
         try:
             await ws.send_text(message)
         except Exception:
-            dead.append(ws)
-
-    for ws in dead:
-        sockets.discard(ws)
+            sockets.discard(ws)
 
 
 async def broadcast_to_all(event: dict) -> None:

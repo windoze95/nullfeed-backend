@@ -14,8 +14,16 @@ from app.services.download_manager import (
     fetch_channel_metadata,
     fetch_channel_videos,
 )
+from app.utils.time import utcnow_naive
 
 logger = logging.getLogger(__name__)
+
+
+def _as_naive_utc(value: datetime | None) -> datetime | None:
+    """Normalize a datetime to naive UTC for safe comparisons."""
+    if value is not None and value.tzinfo is not None:
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
 
 
 def poll_all_channels(db: Session) -> list[str]:
@@ -36,6 +44,7 @@ def poll_all_channels(db: Session) -> list[str]:
             all_auto_download_ids.extend(poll_result["auto_download_ids"])
         except Exception:
             logger.exception("Error polling channel %s", channel_id)
+            db.rollback()
 
     return all_auto_download_ids
 
@@ -49,6 +58,10 @@ def poll_single_channel(channel_id: str, db: Session) -> dict:
     if not channel:
         logger.warning("Channel %s not found", channel_id)
         return {"cataloged_ids": [], "auto_download_ids": []}
+
+    # The very first poll catalogs the back catalog; videos discovered then
+    # must never be auto-downloaded for FUTURE_ONLY subscribers.
+    had_initial_poll = channel.last_checked_at is not None
 
     # Fetch latest videos from YouTube
     fetch_result = fetch_channel_videos(channel.youtube_channel_id)
@@ -72,13 +85,11 @@ def poll_single_channel(channel_id: str, db: Session) -> dict:
             _ensure_user_refs(existing, channel_id, db)
             continue
 
-        # Parse upload_date into uploaded_at
+        # Parse upload_date into uploaded_at (stored as naive UTC)
         uploaded_at = None
         if yt_vid.get("upload_date"):
             try:
-                uploaded_at = datetime.strptime(
-                    yt_vid["upload_date"], "%Y%m%d"
-                ).replace(tzinfo=timezone.utc)
+                uploaded_at = datetime.strptime(yt_vid["upload_date"], "%Y%m%d")
             except (ValueError, TypeError):
                 pass
 
@@ -105,9 +116,11 @@ def poll_single_channel(channel_id: str, db: Session) -> dict:
     # Determine auto-download candidates based on subscriber tracking modes
     auto_download_ids: list[str] = []
     if new_video_ids:
-        auto_download_ids = _determine_auto_downloads(new_video_ids, channel_id, db)
+        auto_download_ids = _determine_auto_downloads(
+            new_video_ids, channel_id, db, had_initial_poll
+        )
 
-    channel.last_checked_at = datetime.now(timezone.utc)
+    channel.last_checked_at = utcnow_naive()
     db.commit()
 
     return {"cataloged_ids": cataloged_ids, "auto_download_ids": auto_download_ids}
@@ -120,7 +133,7 @@ def refresh_stale_channel_metadata(db: Session) -> int:
     """
     from app.config import settings
 
-    staleness_threshold = datetime.now(timezone.utc) - timedelta(
+    staleness_threshold = utcnow_naive() - timedelta(
         hours=settings.metadata_refresh_interval_hours
     )
 
@@ -197,44 +210,58 @@ def _refresh_single_channel_metadata(channel: Channel, db: Session) -> None:
         if images.get("banner_url"):
             channel.banner_url = images["banner_url"]
 
-    channel.metadata_refreshed_at = datetime.now(timezone.utc)
+    channel.metadata_refreshed_at = utcnow_naive()
     db.commit()
 
 
 def _determine_auto_downloads(
-    new_video_ids: list[str], channel_id: str, db: Session
+    new_video_ids: list[str],
+    channel_id: str,
+    db: Session,
+    had_initial_poll: bool,
 ) -> list[str]:
-    """Determine which new videos should be auto-downloaded based on subscriber tracking modes."""
+    """Determine which new videos should be auto-downloaded based on subscriber tracking modes.
+
+    A video qualifies for FUTURE_ONLY auto-download when its row was created
+    during this poll (it's in new_video_ids), the channel already had a
+    completed initial poll (so this isn't back-catalog ingestion), and the
+    row was created after the subscription.
+    """
+    if not had_initial_poll:
+        # Initial poll: everything discovered is back catalog. Catalog only.
+        return []
+
     # Get all subscribers and their tracking modes
     sub_result = db.execute(
         select(UserSubscription).where(UserSubscription.channel_id == channel_id)
     )
     subscriptions = sub_result.scalars().all()
 
-    # If any subscriber has FUTURE_ONLY mode, check upload dates vs subscription dates
-    auto_download_set: set[str] = set()
+    videos = (
+        db.execute(select(Video).where(Video.id.in_(new_video_ids))).scalars().all()
+    )
 
+    auto_download_set: set[str] = set()
     for sub in subscriptions:
         if sub.tracking_mode == "ALL_VIDEOS":
             # ALL_VIDEOS mode: never auto-download, just catalog
             continue
 
-        # FUTURE_ONLY (default): auto-download if uploaded_at > subscribed_at
-        for video_id in new_video_ids:
-            video = db.get(Video, video_id)
-            if not video or video.status != "CATALOGED":
+        # FUTURE_ONLY (default): auto-download videos cataloged after the
+        # user subscribed. Compare as naive UTC.
+        subscribed_at = _as_naive_utc(sub.subscribed_at)
+        if subscribed_at is None:
+            continue
+        for video in videos:
+            if video.status != "CATALOGED":
                 continue
-
-            if video.uploaded_at and sub.subscribed_at:
-                if video.uploaded_at > sub.subscribed_at:
-                    auto_download_set.add(video_id)
-            # If upload_date is unknown, do NOT auto-download for FUTURE_ONLY
-            # (conservative: leave as cataloged to avoid back-catalog spam)
+            created_at = _as_naive_utc(video.created_at)
+            if created_at and created_at > subscribed_at:
+                auto_download_set.add(video.id)
 
     # Set auto-download candidates to PENDING
-    for video_id in auto_download_set:
-        video = db.get(Video, video_id)
-        if video and video.status == "CATALOGED":
+    for video in videos:
+        if video.id in auto_download_set and video.status == "CATALOGED":
             video.status = "PENDING"
 
     return list(auto_download_set)

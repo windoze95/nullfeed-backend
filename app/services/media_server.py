@@ -1,62 +1,135 @@
+import asyncio
+import hashlib
 import mimetypes
 import os
-import hashlib
-from datetime import datetime, timezone
+from collections.abc import AsyncIterator
 from email.utils import formatdate
-from time import mktime
 
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
+
+# Read media files in 1 MiB chunks so large files/ranges are never fully buffered.
+CHUNK_SIZE = 1024 * 1024
 
 
-def build_range_response(file_path: str, range_header: str) -> Response:
+def build_media_response(file_path: str, range_header: str | None = None) -> Response:
+    """Build a streaming HTTP response for a media file.
+
+    Implements RFC 7233 byte ranges:
+    - No Range header -> 200 streaming the full file.
+    - `bytes=N-`, `bytes=N-M`, suffix `bytes=-N` (last N bytes) -> 206.
+    - Multi-range requests are served as the first range only.
+    - Malformed or unsatisfiable ranges -> 416 with `Content-Range: bytes */size`.
+
+    ETag (derived from mtime+size) and Last-Modified are set on both the
+    200 and 206 paths. File content is streamed in chunks via a thread
+    offload — the requested range is never read into memory at once.
     """
-    Build an HTTP 206 Partial Content response for range requests.
-    Supports single byte ranges (e.g. "bytes=0-1023").
-    """
-    file_size = os.path.getsize(file_path)
     stat = os.stat(file_path)
+    file_size = stat.st_size
 
-    # Parse range header: "bytes=start-end"
-    range_spec = range_header.replace("bytes=", "").strip()
-    parts = range_spec.split("-")
+    headers = {
+        "Accept-Ranges": "bytes",
+        "ETag": _compute_etag(stat),
+        "Last-Modified": formatdate(stat.st_mtime, usegmt=True),
+        "Cache-Control": "public, max-age=86400",
+    }
+    content_type = _guess_content_type(file_path)
 
-    start = int(parts[0]) if parts[0] else 0
-    end = int(parts[1]) if len(parts) > 1 and parts[1] else file_size - 1
+    if range_header is None:
+        headers["Content-Length"] = str(file_size)
+        return StreamingResponse(
+            _file_iterator(file_path, 0, file_size),
+            status_code=200,
+            media_type=content_type,
+            headers=headers,
+        )
 
-    # Clamp values
-    start = max(0, start)
-    end = min(end, file_size - 1)
-
-    if start > end or start >= file_size:
+    byte_range = _parse_range(range_header, file_size)
+    if byte_range is None:
         return Response(
             status_code=416,
             headers={"Content-Range": f"bytes */{file_size}"},
         )
 
+    start, end = byte_range
     content_length = end - start + 1
-
-    # Read the requested range
-    with open(file_path, "rb") as f:
-        f.seek(start)
-        data = f.read(content_length)
-
-    content_type = _guess_content_type(file_path)
-    etag = _compute_etag(file_path, stat)
-    last_modified = _format_http_date(stat.st_mtime)
-
-    return Response(
-        content=data,
+    headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
+    headers["Content-Length"] = str(content_length)
+    return StreamingResponse(
+        _file_iterator(file_path, start, content_length),
         status_code=206,
-        headers={
-            "Content-Range": f"bytes {start}-{end}/{file_size}",
-            "Content-Length": str(content_length),
-            "Content-Type": content_type,
-            "Accept-Ranges": "bytes",
-            "ETag": etag,
-            "Last-Modified": last_modified,
-            "Cache-Control": "public, max-age=86400",
-        },
+        media_type=content_type,
+        headers=headers,
     )
+
+
+def _is_ascii_digits(value: str) -> bool:
+    """True when value is one or more ASCII digits (safe to int())."""
+    return bool(value) and value.isascii() and value.isdigit()
+
+
+def _parse_range(range_header: str, file_size: int) -> tuple[int, int] | None:
+    """Parse a Range header into an inclusive (start, end) byte tuple.
+
+    Returns None when the header is malformed or unsatisfiable; the caller
+    responds with 416. Multi-range requests yield the first range only.
+    """
+    header = range_header.strip()
+    if file_size <= 0 or not header.lower().startswith("bytes="):
+        return None
+
+    # Multi-range: serve the first range only.
+    spec = header[len("bytes=") :].split(",")[0].strip()
+    if "-" not in spec:
+        return None
+    start_s, _, end_s = spec.partition("-")
+    start_s = start_s.strip()
+    end_s = end_s.strip()
+
+    if start_s:
+        # Open-ended "N-" or bounded "N-M". ASCII check required: isdigit()
+        # alone accepts non-ASCII digits (e.g. latin-1 '\xb2') that int()
+        # rejects, which would turn a malformed header into a 500.
+        if not _is_ascii_digits(start_s):
+            return None
+        start = int(start_s)
+        if start >= file_size:
+            return None
+        if not end_s:
+            return start, file_size - 1
+        if not _is_ascii_digits(end_s):
+            return None
+        end = int(end_s)
+        if end < start:
+            return None
+        return start, min(end, file_size - 1)
+
+    # Suffix range "-N": the last N bytes of the file.
+    if not _is_ascii_digits(end_s):
+        return None
+    suffix_length = int(end_s)
+    if suffix_length == 0:
+        return None
+    return max(0, file_size - suffix_length), file_size - 1
+
+
+async def _file_iterator(
+    file_path: str, start: int, length: int
+) -> AsyncIterator[bytes]:
+    """Yield `length` bytes from `start` in chunks without blocking the loop."""
+    remaining = length
+    file = await asyncio.to_thread(open, file_path, "rb")
+    try:
+        if start:
+            await asyncio.to_thread(file.seek, start)
+        while remaining > 0:
+            chunk = await asyncio.to_thread(file.read, min(CHUNK_SIZE, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+            yield chunk
+    finally:
+        await asyncio.to_thread(file.close)
 
 
 def _guess_content_type(file_path: str) -> str:
@@ -64,11 +137,6 @@ def _guess_content_type(file_path: str) -> str:
     return mime or "application/octet-stream"
 
 
-def _compute_etag(file_path: str, stat: os.stat_result) -> str:
-    raw = f"{file_path}:{stat.st_size}:{stat.st_mtime}"
+def _compute_etag(stat: os.stat_result) -> str:
+    raw = f"{stat.st_mtime_ns}:{stat.st_size}"
     return f'"{hashlib.md5(raw.encode()).hexdigest()}"'
-
-
-def _format_http_date(timestamp: float) -> str:
-    dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
-    return formatdate(mktime(dt.timetuple()), usegmt=True)

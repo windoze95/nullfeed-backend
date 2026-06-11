@@ -12,3 +12,4 @@ from app.models.video import Video  # noqa: E402, F401
 from app.models.subscription import UserSubscription  # noqa: E402, F401
 from app.models.user_video_ref import UserVideoRef  # noqa: E402, F401
 from app.models.recommendation import Recommendation  # noqa: E402, F401
+from app.models.session import Session  # noqa: E402, F401

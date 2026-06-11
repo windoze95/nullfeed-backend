@@ -1,11 +1,12 @@
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import settings
+from app.database import register_sqlite_pragmas
 from app.tasks.celery_app import celery_app
 from app.models.channel import Channel
 from app.models.subscription import UserSubscription
@@ -15,7 +16,12 @@ from app.services.channel_poller import (
     poll_single_channel,
     refresh_stale_channel_metadata,
 )
-from app.services.download_manager import download_preview, download_video
+from app.services.download_manager import (
+    DownloadCancelled,
+    download_preview,
+    download_video,
+)
+from app.utils.time import utcnow_naive
 from app.services.progress_broadcaster import (
     publish_download_complete,
     publish_download_progress,
@@ -28,6 +34,7 @@ logger = logging.getLogger(__name__)
 _engine = create_engine(
     settings.sync_database_url, connect_args={"check_same_thread": False}
 )
+register_sqlite_pragmas(_engine)
 _SessionLocal = sessionmaker(bind=_engine)
 
 
@@ -114,7 +121,12 @@ def refresh_stale_channel_metadata_task(self) -> dict:
     retry_backoff=True,
     retry_backoff_max=600,
 )
-def download_video_task(self, video_id: str, user_id: str | None = None) -> dict:
+def download_video_task(
+    self,
+    video_id: str,
+    user_id: str | None = None,
+    quality: str | None = None,
+) -> dict:
     """Download a single video from YouTube."""
     db = _get_sync_db()
     try:
@@ -125,6 +137,17 @@ def download_video_task(self, video_id: str, user_id: str | None = None) -> dict
 
         if video.status == "COMPLETE":
             return {"status": "skipped", "reason": "already_complete"}
+
+        # Guard: another worker is already downloading this video
+        if video.status == "DOWNLOADING":
+            return {"status": "skipped", "reason": "already_downloading"}
+
+        # Guard: a cancel is still being confirmed; finish the hand-off here
+        # (the worker that owned the download has already exited).
+        if video.status == "CANCELLING":
+            video.status = "CATALOGED"
+            db.commit()
+            return {"status": "skipped", "reason": "cancelled"}
 
         # Guard: skip CATALOGED videos (they must be explicitly triggered)
         if video.status == "CATALOGED":
@@ -155,12 +178,27 @@ def download_video_task(self, video_id: str, user_id: str | None = None) -> dict
             def progress_cb(percentage: float) -> None:
                 publish_download_progress(video_id, user_id, percentage)
 
+        def _is_cancelled() -> bool:
+            """True when the video is no longer DOWNLOADING (e.g. cancelled)."""
+            check_db = _get_sync_db()
+            try:
+                status = check_db.execute(
+                    select(Video.status).where(Video.id == video_id)
+                ).scalar_one_or_none()
+                return status != "DOWNLOADING"
+            except Exception:
+                logger.warning("Cancel check failed for video %s", video_id)
+                return False
+            finally:
+                check_db.close()
+
         # Perform the download
         result = download_video(
             youtube_video_id=video.youtube_video_id,
             channel_slug=channel.slug,
-            quality=settings.media_quality,
+            quality=quality or settings.media_quality,
             progress_callback=progress_cb,
+            cancel_check=_is_cancelled,
         )
 
         # Update video record with results
@@ -170,12 +208,11 @@ def download_video_task(self, video_id: str, user_id: str | None = None) -> dict
         video.duration_seconds = result["duration_seconds"]
         video.metadata_json = result.get("metadata_json")
         video.status = "COMPLETE"
+        video.downloaded_at = utcnow_naive()
 
         if result.get("uploaded_at"):
             try:
-                video.uploaded_at = datetime.strptime(
-                    result["uploaded_at"], "%Y%m%d"
-                ).replace(tzinfo=timezone.utc)
+                video.uploaded_at = datetime.strptime(result["uploaded_at"], "%Y%m%d")
             except (ValueError, TypeError):
                 pass
 
@@ -193,34 +230,67 @@ def download_video_task(self, video_id: str, user_id: str | None = None) -> dict
 
         db.commit()
 
-        # Notify all subscribers of this channel
-        subscriber_ids = (
-            db.execute(
-                select(UserSubscription.user_id).where(
-                    UserSubscription.channel_id == video.channel_id
+        # Notify all subscribers of this channel. Isolated from the retry
+        # path: a publish failure after commit must never re-download.
+        try:
+            subscriber_ids = (
+                db.execute(
+                    select(UserSubscription.user_id).where(
+                        UserSubscription.channel_id == video.channel_id
+                    )
                 )
+                .scalars()
+                .all()
             )
-            .scalars()
-            .all()
-        )
-        for sub_user_id in subscriber_ids:
-            publish_download_complete(
-                video_id, sub_user_id, channel_id=video.channel_id
+            for sub_user_id in subscriber_ids:
+                publish_download_complete(
+                    video_id,
+                    sub_user_id,
+                    channel_id=video.channel_id,
+                    title=video.title,
+                    youtube_video_id=video.youtube_video_id,
+                )
+        except Exception:
+            logger.exception(
+                "Failed to publish download_complete for video %s", video_id
             )
 
         logger.info("Download complete: %s (%s)", video.youtube_video_id, video.title)
         return {"status": "complete", "video_id": video_id}
 
-    except Exception as exc:
-        logger.exception("Download failed for video %s", video_id)
-        # Mark as FAILED if we've exhausted retries
+    except DownloadCancelled:
+        # Partial files were cleaned up by the download loop. Confirm the
+        # cancel hand-off: CANCELLING -> CATALOGED re-enables re-downloads.
+        logger.info("Download cancelled for video %s", video_id)
         try:
+            db.rollback()
             video = db.get(Video, video_id)
-            if video and self.request.retries >= self.max_retries:
-                video.status = "FAILED"
+            if video and video.status == "CANCELLING":
+                video.status = "CATALOGED"
                 db.commit()
         except Exception:
-            pass
+            logger.exception("Could not confirm cancel for video %s", video_id)
+        return {"status": "cancelled", "video_id": video_id}
+
+    except Exception as exc:
+        logger.exception("Download failed for video %s", video_id)
+        # A retry must pass the already-downloading guard above, so reset the
+        # status to PENDING when another attempt is coming; otherwise this is
+        # terminal (retries exhausted, or an exception type we never retry)
+        # and the video is marked FAILED.
+        will_retry = (
+            isinstance(exc, RuntimeError) and self.request.retries < self.max_retries
+        )
+        try:
+            db.rollback()
+            video = db.get(Video, video_id)
+            if video and video.status == "DOWNLOADING":
+                video.status = "PENDING" if will_retry else "FAILED"
+                db.commit()
+        except Exception:
+            logger.exception(
+                "Could not update status after failed download of %s", video_id
+            )
         raise exc
     finally:
         db.close()

@@ -57,7 +57,10 @@ async def continue_watching(
             UserVideoRef.watch_position_seconds > 0,
             Video.status == "COMPLETE",
         )
-        .order_by(UserVideoRef.added_at.desc())
+        .order_by(
+            UserVideoRef.last_watched_at.desc().nullslast(),
+            UserVideoRef.added_at.desc(),
+        )
         .limit(limit)
     )
     rows = result.all()
@@ -89,40 +92,41 @@ async def new_episodes(
         select(UserSubscription.channel_id).where(UserSubscription.user_id == user.id)
     )
     subscribed_ids = [row[0] for row in sub_result.all()]
+    if not subscribed_ids:
+        return []
+
+    # One query for all unwatched videos across subscribed channels; keep the
+    # newest unwatched video per channel.
+    result = await db.execute(
+        select(UserVideoRef, Video, Channel)
+        .join(Video, UserVideoRef.video_id == Video.id)
+        .join(Channel, Video.channel_id == Channel.id)
+        .where(
+            UserVideoRef.user_id == user.id,
+            UserVideoRef.removed_at.is_(None),
+            UserVideoRef.is_watched == False,  # noqa: E712
+            Video.channel_id.in_(subscribed_ids),
+            Video.status == "COMPLETE",
+        )
+        .order_by(Video.uploaded_at.desc().nullslast())
+    )
 
     items = []
-    for channel_id in subscribed_ids:
-        ch_result = await db.execute(select(Channel).where(Channel.id == channel_id))
-        channel = ch_result.scalar_one_or_none()
-        if not channel:
+    seen_channels: set[str] = set()
+    for ref, video, channel in result.all():
+        if channel.id in seen_channels:
             continue
-
-        # Count unwatched videos for this user in this channel
-        unwatched_result = await db.execute(
-            select(UserVideoRef, Video)
-            .join(Video, UserVideoRef.video_id == Video.id)
-            .where(
-                UserVideoRef.user_id == user.id,
-                UserVideoRef.removed_at.is_(None),
-                UserVideoRef.is_watched == False,  # noqa: E712
-                Video.channel_id == channel_id,
-                Video.status == "COMPLETE",
-            )
-            .order_by(Video.uploaded_at.desc())
-        )
-        unwatched_rows = unwatched_result.all()
-        if not unwatched_rows:
-            continue
-
-        ref, latest_video = unwatched_rows[0]
+        seen_channels.add(channel.id)
         items.append(
             FeedItem(
                 channel=_channel_out(channel),
-                video=_video_out(latest_video, ref),
+                video=_video_out(video, ref),
             )
         )
+        if len(items) >= limit:
+            break
 
-    return items[:limit]
+    return items
 
 
 @router.get("/recently-added", response_model=list[FeedItem])
@@ -141,7 +145,10 @@ async def recently_added(
             UserVideoRef.removed_at.is_(None),
             Video.status == "COMPLETE",
         )
-        .order_by(Video.uploaded_at.desc())
+        .order_by(
+            Video.downloaded_at.desc().nullslast(),
+            Video.created_at.desc(),
+        )
         .limit(limit)
     )
     rows = result.all()

@@ -1,21 +1,24 @@
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 from fastapi import APIRouter, Depends, Header, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from sqlalchemy import or_, select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.auth import get_current_user, validate_token
+from app.config import settings
 from app.database import get_db
 from app.models.user import User
 from app.models.user_video_ref import UserVideoRef
 from app.models.video import Video
-from app.schemas.video import VideoDetail, VideoOut, VideoProgress
-from app.services.media_server import build_range_response
+from app.schemas.video import DownloadRequest, VideoDetail, VideoOut, VideoProgress
+from app.services.media_server import build_media_response
 from app.services.storage import check_and_delete_orphan
 from app.tasks.download_tasks import download_preview_task, download_video_task
+from app.utils.time import utcnow_naive
 
 router = APIRouter(prefix="/api/videos", tags=["videos"])
 
@@ -25,7 +28,7 @@ async def get_active_downloads(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[VideoOut]:
-    cutoff = datetime.now(timezone.utc) - timedelta(seconds=60)
+    cutoff = utcnow_naive() - timedelta(seconds=60)
 
     stmt = (
         select(Video)
@@ -37,7 +40,7 @@ async def get_active_downloads(
             or_(
                 Video.status.in_(["PENDING", "DOWNLOADING"]),
                 # Include recently completed videos for the "done" transition
-                (Video.status == "COMPLETE") & (Video.created_at >= cutoff),
+                (Video.status == "COMPLETE") & (Video.downloaded_at >= cutoff),
             ),
         )
         .order_by(Video.created_at.desc())
@@ -99,6 +102,7 @@ async def get_video(
         thumbnail_url=f"/data/thumbnails/{video.youtube_video_id}.jpg",
         watch_position_seconds=ref.watch_position_seconds if ref else 0,
         is_watched=ref.is_watched if ref else False,
+        last_watched_at=ref.last_watched_at if ref else None,
         metadata_json=video.metadata_json,
         channel_name=channel.name if channel else "",
         channel_slug=channel.slug if channel else "",
@@ -108,6 +112,7 @@ async def get_video(
 @router.post("/{video_id}/download")
 async def trigger_download(
     video_id: str,
+    body: DownloadRequest | None = None,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
@@ -116,16 +121,20 @@ async def trigger_download(
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
 
-    if video.status in ("DOWNLOADING", "PENDING"):
-        return {"detail": "Download already in progress", "video_id": video_id}
+    if video.status in ("PENDING", "DOWNLOADING"):
+        raise HTTPException(status_code=409, detail="Download already in progress")
+    if video.status == "CANCELLING":
+        raise HTTPException(
+            status_code=409, detail="Previous download is still being cancelled"
+        )
 
-    # CATALOGED, FAILED, COMPLETE — (re-)enqueue
+    # CATALOGED, FAILED, COMPLETE — (re-)enqueue. Keep file_path/file_size_bytes
+    # intact so the existing file stays playable until the worker replaces it.
     video.status = "PENDING"
-    video.file_path = None
-    video.file_size_bytes = 0
     await db.commit()
 
-    download_video_task.delay(video_id, user.id)
+    quality = body.quality if body else None
+    download_video_task.delay(video_id, user.id, quality=quality)
 
     return {"detail": "Download enqueued", "video_id": video_id}
 
@@ -141,10 +150,20 @@ async def cancel_download(
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
 
+    if video.status == "CANCELLING":
+        # Escape hatch: a second cancel force-clears a cancel whose worker
+        # never confirmed (e.g. the worker died mid-download).
+        video.status = "CATALOGED"
+        await db.commit()
+        return {"detail": "Download cancelled", "video_id": video_id}
+
     if video.status not in ("PENDING", "DOWNLOADING"):
         return {"detail": "Not in progress", "video_id": video_id}
 
-    video.status = "CATALOGED"
+    # PENDING tasks never started — the worker's start guard skips CATALOGED.
+    # An in-flight download moves to CANCELLING until the worker confirms it
+    # has killed yt-dlp and cleaned up, blocking a concurrent re-download.
+    video.status = "CATALOGED" if video.status == "PENDING" else "CANCELLING"
     await db.commit()
 
     return {"detail": "Download cancelled", "video_id": video_id}
@@ -178,9 +197,9 @@ async def stream_preview(
     x_user_token: str | None = Header(None),
     db: AsyncSession = Depends(get_db),
     range_header: str | None = Header(None, alias="Range"),
-):
+) -> Response:
     auth_token = token or x_user_token
-    if not auth_token or not validate_token(auth_token):
+    if not auth_token or not await validate_token(auth_token):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     result = await db.execute(select(Video).where(Video.id == video_id))
@@ -192,22 +211,12 @@ async def stream_preview(
 
     file_path = video.preview_file_path
     if not os.path.isabs(file_path):
-        file_path = os.path.join("/data/media", file_path)
+        file_path = os.path.join(settings.media_path, file_path)
 
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Preview file missing from disk")
 
-    if range_header:
-        return build_range_response(file_path, range_header)
-
-    return FileResponse(
-        file_path,
-        media_type="video/mp4",
-        headers={
-            "Accept-Ranges": "bytes",
-            "Content-Length": str(os.path.getsize(file_path)),
-        },
-    )
+    return build_media_response(file_path, range_header)
 
 
 @router.get("/{video_id}/stream")
@@ -217,10 +226,10 @@ async def stream_video(
     x_user_token: str | None = Header(None),
     db: AsyncSession = Depends(get_db),
     range_header: str | None = Header(None, alias="Range"),
-):
+) -> Response:
     # Accept auth via query param (for <video> element) or header
     auth_token = token or x_user_token
-    if not auth_token or not validate_token(auth_token):
+    if not auth_token or not await validate_token(auth_token):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     result = await db.execute(select(Video).where(Video.id == video_id))
@@ -232,22 +241,12 @@ async def stream_video(
 
     file_path = video.file_path
     if not os.path.isabs(file_path):
-        file_path = os.path.join("/data/media", file_path)
+        file_path = os.path.join(settings.media_path, file_path)
 
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Video file missing from disk")
 
-    if range_header:
-        return build_range_response(file_path, range_header)
-
-    return FileResponse(
-        file_path,
-        media_type="video/mp4",
-        headers={
-            "Accept-Ranges": "bytes",
-            "Content-Length": str(os.path.getsize(file_path)),
-        },
-    )
+    return build_media_response(file_path, range_header)
 
 
 @router.put("/{video_id}/progress")
@@ -258,24 +257,41 @@ async def update_progress(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     result = await db.execute(
-        select(UserVideoRef).where(
-            UserVideoRef.user_id == user.id,
-            UserVideoRef.video_id == video_id,
-            UserVideoRef.removed_at.is_(None),
-        )
+        select(Video.duration_seconds).where(Video.id == video_id)
     )
-    ref = result.scalar_one_or_none()
-    if not ref:
-        ref = UserVideoRef(
-            user_id=user.id,
-            video_id=video_id,
-            watch_position_seconds=body.position_seconds,
-            is_watched=body.is_watched,
-        )
-        db.add(ref)
-    else:
-        ref.watch_position_seconds = body.position_seconds
-        ref.is_watched = body.is_watched
+    row = result.one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Video not found")
+    duration = row[0]
+
+    # The client only reports positions; watched state is derived here. A
+    # position within the last 5% (or 30s) of the video marks it watched;
+    # restarting a watched video makes it in-progress again.
+    is_watched = bool(body.is_watched)
+    if not is_watched and duration and duration > 0:
+        is_watched = body.position_seconds >= max(duration * 0.95, duration - 30)
+
+    now = utcnow_naive()
+    stmt = sqlite_insert(UserVideoRef).values(
+        user_id=user.id,
+        video_id=video_id,
+        watch_position_seconds=body.position_seconds,
+        is_watched=is_watched,
+        added_at=now,
+        removed_at=None,
+        last_watched_at=now,
+    )
+    # UPSERT: update progress and reactivate soft-deleted refs in one statement.
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["user_id", "video_id"],
+        set_={
+            "watch_position_seconds": body.position_seconds,
+            "is_watched": is_watched,
+            "removed_at": None,
+            "last_watched_at": now,
+        },
+    )
+    await db.execute(stmt)
     await db.commit()
     return {"detail": "Progress updated"}
 
@@ -297,7 +313,7 @@ async def remove_video_ref(
     if not ref:
         raise HTTPException(status_code=404, detail="Video reference not found")
 
-    ref.removed_at = datetime.now(timezone.utc)
+    ref.removed_at = utcnow_naive()
     await db.commit()
 
     # Check if this was the last active reference; if so, delete file from disk.

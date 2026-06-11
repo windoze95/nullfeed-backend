@@ -1,3 +1,5 @@
+import asyncio
+import logging
 import re
 import uuid
 
@@ -12,10 +14,20 @@ from app.models.subscription import UserSubscription
 from app.models.user import User
 from app.models.user_video_ref import UserVideoRef
 from app.models.video import Video
-from app.schemas.channel import ChannelDetail, ChannelOut, ChannelSubscribe
+from app.schemas.channel import (
+    BulkSubscribeItem,
+    BulkSubscribeItemResult,
+    BulkSubscribeRequest,
+    BulkSubscribeResponse,
+    ChannelDetail,
+    ChannelOut,
+    ChannelSubscribe,
+)
 from app.schemas.video import VideoOut, VideoPagination
 from app.services.download_manager import fetch_channel_images, fetch_channel_metadata
 from app.tasks.download_tasks import poll_channel_task
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/channels", tags=["channels"])
 
@@ -23,6 +35,46 @@ router = APIRouter(prefix="/api/channels", tags=["channels"])
 def _slugify(name: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
     return slug or "channel"
+
+
+async def _unique_slug(base: str, db: AsyncSession) -> str:
+    """Return `base`, deduped with a -2, -3, ... suffix against existing slugs."""
+    result = await db.execute(select(Channel.slug).where(Channel.slug.like(f"{base}%")))
+    existing = {row[0] for row in result.all()}
+    if base not in existing:
+        return base
+    n = 2
+    while f"{base}-{n}" in existing:
+        n += 1
+    return f"{base}-{n}"
+
+
+async def _ensure_refs_for_channel(
+    user_id: str, channel_id: str, db: AsyncSession
+) -> None:
+    """Ensure the user has an active UserVideoRef for every video in the channel.
+
+    Creates missing refs and reactivates soft-deleted ones (removed_at set).
+    """
+    video_result = await db.execute(
+        select(Video.id).where(Video.channel_id == channel_id)
+    )
+    video_ids = [row[0] for row in video_result.all()]
+    if not video_ids:
+        return
+    ref_result = await db.execute(
+        select(UserVideoRef).where(
+            UserVideoRef.user_id == user_id,
+            UserVideoRef.video_id.in_(video_ids),
+        )
+    )
+    refs_by_video = {ref.video_id: ref for ref in ref_result.scalars().all()}
+    for video_id in video_ids:
+        ref = refs_by_video.get(video_id)
+        if ref is None:
+            db.add(UserVideoRef(user_id=user_id, video_id=video_id))
+        elif ref.removed_at is not None:
+            ref.removed_at = None
 
 
 @router.get("", response_model=list[ChannelOut])
@@ -33,6 +85,12 @@ async def list_channels(
     result = await db.execute(select(Channel).order_by(Channel.name))
     channels = result.scalars().all()
 
+    # Per-channel video counts in a single GROUP BY query
+    count_result = await db.execute(
+        select(Video.channel_id, func.count()).group_by(Video.channel_id)
+    )
+    video_counts = {row[0]: row[1] for row in count_result.all()}
+
     # Gather subscription status for this user
     sub_result = await db.execute(
         select(UserSubscription.channel_id).where(UserSubscription.user_id == user.id)
@@ -41,12 +99,8 @@ async def list_channels(
 
     out = []
     for ch in channels:
-        video_count_result = await db.execute(
-            select(func.count()).select_from(Video).where(Video.channel_id == ch.id)
-        )
-        video_count = video_count_result.scalar() or 0
         item = ChannelOut.model_validate(ch)
-        item.video_count = video_count
+        item.video_count = video_counts.get(ch.id, 0)
         item.is_subscribed = ch.id in subscribed_ids
         out.append(item)
     return out
@@ -68,7 +122,7 @@ async def subscribe(
 
     # Resolve channel metadata to get canonical UC ID and display name.
     # This lets us detect duplicates when subscribing via handle vs UC ID.
-    meta = await _resolve_channel(yt_channel_id)
+    meta = await asyncio.to_thread(fetch_channel_metadata, yt_channel_id)
     canonical_id = meta.get("channel_id", yt_channel_id)
     resolved_name = meta.get("name", yt_channel_id)
 
@@ -82,16 +136,17 @@ async def subscribe(
 
     if not channel:
         # Fetch channel avatar & banner from YouTube
-        images = await _resolve_channel_images(canonical_id)
+        images = await asyncio.to_thread(fetch_channel_images, canonical_id)
 
         # Create the channel record with resolved metadata
+        base_slug = _slugify(
+            resolved_name if resolved_name != yt_channel_id else yt_channel_id
+        )
         channel = Channel(
             id=str(uuid.uuid4()),
             youtube_channel_id=canonical_id,
             name=resolved_name,
-            slug=_slugify(
-                resolved_name if resolved_name != yt_channel_id else yt_channel_id
-            ),
+            slug=await _unique_slug(base_slug, db),
             description=meta.get("description", ""),
             avatar_url=images.get("avatar_url"),
             banner_url=images.get("banner_url"),
@@ -119,19 +174,8 @@ async def subscribe(
     )
     db.add(sub)
 
-    # Create user video refs for ALL existing videos in this channel (not just COMPLETE)
-    video_result = await db.execute(select(Video).where(Video.channel_id == channel.id))
-    existing_videos = video_result.scalars().all()
-    for video in existing_videos:
-        ref_check = await db.execute(
-            select(UserVideoRef).where(
-                UserVideoRef.user_id == user.id,
-                UserVideoRef.video_id == video.id,
-            )
-        )
-        if not ref_check.scalar_one_or_none():
-            ref = UserVideoRef(user_id=user.id, video_id=video.id)
-            db.add(ref)
+    # Create/reactivate user video refs for ALL existing videos in this channel
+    await _ensure_refs_for_channel(user.id, channel.id, db)
 
     await db.commit()
     await db.refresh(channel)
@@ -142,6 +186,107 @@ async def subscribe(
     out = ChannelOut.model_validate(channel)
     out.is_subscribed = True
     return out
+
+
+@router.post("/subscribe-bulk", response_model=BulkSubscribeResponse)
+async def subscribe_bulk(
+    body: BulkSubscribeRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> BulkSubscribeResponse:
+    """Subscribe to up to 25 channels at once. Per-item errors don't fail the batch."""
+    results: list[BulkSubscribeItemResult] = []
+    for item in body.items:
+        try:
+            results.append(await _subscribe_bulk_item(item, user, db))
+        except Exception:
+            logger.exception("Bulk subscribe failed for %s", item.youtube_channel_id)
+            await db.rollback()
+            results.append(
+                BulkSubscribeItemResult(
+                    youtube_channel_id=item.youtube_channel_id,
+                    status="error",
+                    detail="Subscription failed",
+                )
+            )
+    return BulkSubscribeResponse(results=results)
+
+
+async def _subscribe_bulk_item(
+    item: BulkSubscribeItem, user: User, db: AsyncSession
+) -> BulkSubscribeItemResult:
+    yt_channel_id = item.youtube_channel_id.strip()
+
+    result = await db.execute(
+        select(Channel).where(Channel.youtube_channel_id == yt_channel_id)
+    )
+    channel = result.scalar_one_or_none()
+
+    created = False
+    if not channel:
+        # Create the channel WITHOUT resolving via yt-dlp when a name is
+        # provided; the enqueued poll refreshes metadata/images async.
+        name = (item.name or "").strip()
+        if not name:
+            # Best effort: resolve the display name in a thread executor.
+            meta = await asyncio.to_thread(fetch_channel_metadata, yt_channel_id)
+            name = (meta.get("name") or "").strip()
+            # fetch_channel_metadata echoes the input back on failure.
+            if not name or (
+                name == yt_channel_id
+                and meta.get("channel_id") == yt_channel_id
+                and not meta.get("handle")
+            ):
+                return BulkSubscribeItemResult(
+                    youtube_channel_id=item.youtube_channel_id,
+                    status="error",
+                    detail="Could not resolve channel name",
+                )
+        channel = Channel(
+            id=str(uuid.uuid4()),
+            youtube_channel_id=yt_channel_id,
+            name=name,
+            slug=await _unique_slug(_slugify(name), db),
+            description="",
+            avatar_url=None,
+            banner_url=None,
+        )
+        db.add(channel)
+        await db.flush()
+        created = True
+
+    sub_result = await db.execute(
+        select(UserSubscription).where(
+            UserSubscription.user_id == user.id,
+            UserSubscription.channel_id == channel.id,
+        )
+    )
+    if sub_result.scalar_one_or_none():
+        return BulkSubscribeItemResult(
+            youtube_channel_id=item.youtube_channel_id,
+            status="already_subscribed",
+            channel_id=channel.id,
+        )
+
+    db.add(
+        UserSubscription(
+            user_id=user.id,
+            channel_id=channel.id,
+            retention_policy="KEEP_ALL",
+            tracking_mode="FUTURE_ONLY",
+        )
+    )
+    await _ensure_refs_for_channel(user.id, channel.id, db)
+    await db.commit()
+
+    if created:
+        poll_channel_task.delay(channel.id)
+
+    return BulkSubscribeItemResult(
+        youtube_channel_id=item.youtube_channel_id,
+        status="subscribed",
+        channel_id=channel.id,
+    )
 
 
 @router.post("/{channel_id}/refresh-images", response_model=ChannelDetail)
@@ -156,7 +301,7 @@ async def refresh_channel_images(
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
 
-    images = await _resolve_channel_images(channel.youtube_channel_id)
+    images = await asyncio.to_thread(fetch_channel_images, channel.youtube_channel_id)
     if images.get("avatar_url"):
         channel.avatar_url = images["avatar_url"]
     if images.get("banner_url"):
@@ -277,16 +422,22 @@ async def list_channel_videos(
     )
     videos = result.scalars().all()
 
-    items = []
-    for v in videos:
+    # One query for the user's refs across this page of videos
+    refs_by_video: dict[str, UserVideoRef] = {}
+    video_ids = [v.id for v in videos]
+    if video_ids:
         ref_result = await db.execute(
             select(UserVideoRef).where(
                 UserVideoRef.user_id == user.id,
-                UserVideoRef.video_id == v.id,
+                UserVideoRef.video_id.in_(video_ids),
                 UserVideoRef.removed_at.is_(None),
             )
         )
-        ref = ref_result.scalar_one_or_none()
+        refs_by_video = {ref.video_id: ref for ref in ref_result.scalars().all()}
+
+    items = []
+    for v in videos:
+        ref = refs_by_video.get(v.id)
         item = VideoOut(
             id=v.id,
             youtube_video_id=v.youtube_video_id,
@@ -299,6 +450,7 @@ async def list_channel_videos(
             thumbnail_url=f"/data/thumbnails/{v.youtube_video_id}.jpg",
             watch_position_seconds=ref.watch_position_seconds if ref else 0,
             is_watched=ref.is_watched if ref else False,
+            last_watched_at=ref.last_watched_at if ref else None,
         )
         items.append(item)
 
@@ -306,10 +458,19 @@ async def list_channel_videos(
 
 
 def _extract_channel_id(url: str) -> str | None:
-    """Best-effort extraction of a YouTube channel ID from a URL."""
+    """Best-effort extraction of a YouTube channel ID from a URL or handle."""
+    url = url.strip()
+
+    # Bare handle ("@mkbhd") or raw UC channel id — e.g. from AI
+    # recommendations, which store handles for one-tap subscribe.
+    if re.fullmatch(r"@[a-zA-Z0-9_.-]+", url):
+        return url
+    if re.fullmatch(r"UC[a-zA-Z0-9_-]{10,}", url):
+        return url
+
     patterns = [
         r"youtube\.com/channel/([a-zA-Z0-9_-]+)",
-        r"youtube\.com/@([a-zA-Z0-9_.-]+)",
+        r"youtube\.com/(@[a-zA-Z0-9_.-]+)",
         r"youtube\.com/c/([a-zA-Z0-9_.-]+)",
         r"youtube\.com/user/([a-zA-Z0-9_.-]+)",
     ]
@@ -318,25 +479,3 @@ def _extract_channel_id(url: str) -> str | None:
         if match:
             return match.group(1)
     return None
-
-
-async def _resolve_channel(yt_channel_id: str) -> dict:
-    """Resolve a YouTube channel handle/ID to its canonical metadata.
-
-    Runs the blocking yt-dlp call in a thread to avoid blocking the event loop.
-    """
-    import asyncio
-
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, fetch_channel_metadata, yt_channel_id)
-
-
-async def _resolve_channel_images(yt_channel_id: str) -> dict:
-    """Fetch channel avatar and banner URLs from YouTube.
-
-    Runs the blocking HTTP call in a thread to avoid blocking the event loop.
-    """
-    import asyncio
-
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, fetch_channel_images, yt_channel_id)
