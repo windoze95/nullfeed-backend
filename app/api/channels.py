@@ -413,10 +413,13 @@ async def list_channel_videos(
     total = total_result.scalar() or 0
 
     offset = (page - 1) * per_page
+    # Videos cataloged from flat-playlist polls have no upload date until
+    # they are downloaded; fall back to catalog time so freshly discovered
+    # episodes sort to the top instead of the bottom.
     result = await db.execute(
         select(Video)
         .where(Video.channel_id == channel_id)
-        .order_by(Video.uploaded_at.desc())
+        .order_by(func.coalesce(Video.uploaded_at, Video.created_at).desc())
         .offset(offset)
         .limit(per_page)
     )
