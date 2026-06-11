@@ -70,7 +70,13 @@ def poll_single_channel(channel_id: str, db: Session) -> dict:
     cataloged_ids: list[str] = []
     new_video_ids: list[str] = []
 
-    for yt_vid in yt_videos:
+    # yt-dlp returns the channel feed newest-first. Cataloged videos have no
+    # upload date until downloaded, and listings fall back to created_at — so
+    # stamp each new row with a synthetic timestamp that decreases down the
+    # feed, preserving the feed order within this poll batch.
+    poll_started_at = utcnow_naive()
+
+    for index, yt_vid in enumerate(yt_videos):
         yt_video_id = yt_vid["youtube_video_id"]
         if not yt_video_id:
             continue
@@ -102,6 +108,7 @@ def poll_single_channel(channel_id: str, db: Session) -> dict:
             duration_seconds=yt_vid.get("duration_seconds", 0),
             uploaded_at=uploaded_at,
             status="CATALOGED",
+            created_at=poll_started_at - timedelta(seconds=index),
         )
         db.add(video)
         db.flush()
