@@ -14,15 +14,25 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 
+class DownloadCancelled(Exception):
+    """Raised when an in-flight download is cancelled (e.g. via the API)."""
+
+
 def download_video(
     youtube_video_id: str,
     channel_slug: str,
     quality: str | None = None,
     progress_callback: Callable[[float], None] | None = None,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> dict:
     """
     Download a video using yt-dlp. Returns metadata dict on success.
-    Raises RuntimeError on failure.
+
+    `cancel_check` is polled every ~5s while the download runs; when it
+    returns True, yt-dlp is killed, partial files are cleaned up, and
+    DownloadCancelled is raised.
+
+    Raises RuntimeError on failure, DownloadCancelled on cancellation.
     """
     quality = quality or settings.media_quality
     output_dir = os.path.join(settings.media_path, channel_slug)
@@ -77,11 +87,26 @@ def download_video(
     # aria2c:        [#abc 1.7MiB/81MiB(2%) ...]
     progress_re = re.compile(r"\[download\]\s+([\d.]+)%|\((\d+)%\)")
     last_callback_time = 0.0
+    last_cancel_check_time = time.monotonic()
     last_line = ""
 
     try:
         for line in process.stdout or []:
             last_line = line
+
+            # Poll for cancellation every ~5s while output is flowing
+            if cancel_check is not None:
+                now = time.monotonic()
+                if now - last_cancel_check_time >= 5.0:
+                    last_cancel_check_time = now
+                    if cancel_check():
+                        process.kill()
+                        process.wait()
+                        _cleanup_partial_files(output_dir, youtube_video_id)
+                        raise DownloadCancelled(
+                            f"Download cancelled for {youtube_video_id}"
+                        )
+
             m = progress_re.search(line)
             if m and progress_callback is not None:
                 now = time.monotonic()
@@ -158,21 +183,24 @@ def download_preview(
 
     logger.info("Starting preview download: %s", youtube_video_id)
 
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-
+    # subprocess.run drains stdout/stderr while waiting (via communicate),
+    # avoiding the pipe-fill deadlock of Popen + wait with a PIPE attached.
     try:
-        process.wait(timeout=120)
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
     except subprocess.TimeoutExpired:
-        process.kill()
         raise RuntimeError(f"Preview download timed out for {youtube_video_id}")
 
-    if process.returncode != 0:
-        raise RuntimeError(f"Preview download failed for {youtube_video_id}")
+    if result.returncode != 0:
+        tail = (result.stderr or result.stdout or "").strip().splitlines()[-1:]
+        detail = tail[0] if tail else "unknown error"
+        raise RuntimeError(
+            f"Preview download failed for {youtube_video_id}: {detail[:300]}"
+        )
 
     file_path = _find_preview_file(output_dir, video_id)
     if not file_path:
@@ -185,6 +213,29 @@ def download_preview(
         "file_path": relative_path,
         "file_size_bytes": file_size,
     }
+
+
+def _cleanup_partial_files(output_dir: str, youtube_video_id: str) -> None:
+    """Remove partial download artifacts for a video in the channel directory.
+
+    Targets `.part`, `.aria2`, `.ytdl` files and `.fNNN.` format fragments
+    left behind by an interrupted yt-dlp/aria2c download.
+    """
+    try:
+        entries = os.listdir(output_dir)
+    except OSError:
+        return
+    fragment_re = re.compile(rf"^{re.escape(youtube_video_id)}\.f\d+\.")
+    for name in entries:
+        if not name.startswith(youtube_video_id):
+            continue
+        if name.endswith((".part", ".aria2", ".ytdl")) or fragment_re.match(name):
+            path = os.path.join(output_dir, name)
+            try:
+                os.remove(path)
+                logger.info("Removed partial file: %s", path)
+            except OSError:
+                logger.warning("Failed to remove partial file: %s", path)
 
 
 def _find_preview_file(output_dir: str, video_id: str) -> str | None:

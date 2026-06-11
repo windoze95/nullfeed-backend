@@ -1,6 +1,7 @@
 from datetime import datetime
+from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class VideoOut(BaseModel):
@@ -28,8 +29,12 @@ class VideoDetail(VideoOut):
 
 
 class VideoProgress(BaseModel):
-    position_seconds: int
+    position_seconds: int = Field(ge=0)
     is_watched: bool = False
+
+
+class DownloadRequest(BaseModel):
+    quality: Literal["720p", "1080p", "4k", "best"] | None = None
 
 
 class VideoPagination(BaseModel):

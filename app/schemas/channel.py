@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ChannelOut(BaseModel):
@@ -29,3 +29,23 @@ class ChannelSubscribe(BaseModel):
 class ChannelDetail(ChannelOut):
     subscriber_count: int = 0
     tracking_mode: str | None = None
+
+
+class BulkSubscribeItem(BaseModel):
+    youtube_channel_id: str = Field(min_length=1)
+    name: str | None = None
+
+
+class BulkSubscribeRequest(BaseModel):
+    items: list[BulkSubscribeItem] = Field(min_length=1, max_length=25)
+
+
+class BulkSubscribeItemResult(BaseModel):
+    youtube_channel_id: str
+    status: str  # "subscribed" | "already_subscribed" | "error"
+    channel_id: str | None = None
+    detail: str | None = None
+
+
+class BulkSubscribeResponse(BaseModel):
+    results: list[BulkSubscribeItemResult]

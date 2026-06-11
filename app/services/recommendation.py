@@ -19,7 +19,8 @@ RECOMMENDATION_PROMPT = """You are a YouTube channel recommendation engine. Base
 
 For each suggestion, provide:
 1. The channel name
-2. A brief reason why the user would enjoy it
+2. The channel's YouTube @handle (e.g. "@mkbhd")
+3. A brief reason why the user would enjoy it
 
 Current subscriptions:
 {subscriptions}
@@ -32,7 +33,7 @@ Previously dismissed suggestions (do not recommend these again):
 
 Respond in JSON format:
 [
-  {{"channel_name": "ChannelName", "reason": "Because you watch..."}}
+  {{"channel_name": "ChannelName", "handle": "@channelhandle", "reason": "Because you watch..."}}
 ]
 
 Only return the JSON array, no other text."""
@@ -69,18 +70,25 @@ async def generate_recommendations(
     )
 
     try:
-        client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-        message = client.messages.create(
-            model="claude-sonnet-4-20250514",
+        client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+        message = await client.messages.create(
+            model="claude-sonnet-4-6",
             max_tokens=1024,
             messages=[{"role": "user", "content": prompt}],
         )
 
         block = message.content[0]
         response_text = block.text if hasattr(block, "text") else ""
+        # Strip markdown code fences if the model wrapped the JSON anyway
+        response_text = response_text.strip()
+        if response_text.startswith("```"):
+            response_text = response_text.strip("`")
+            response_text = response_text.removeprefix("json").strip()
         suggestions = json.loads(response_text)
-    except Exception:
-        logger.exception("Failed to get recommendations from Anthropic")
+        if not isinstance(suggestions, list):
+            raise ValueError("Expected a JSON array of suggestions")
+    except Exception as exc:
+        logger.warning("Failed to get recommendations from Anthropic: %s", exc)
         return []
 
     # Clear old non-dismissed recommendations for this user
@@ -93,13 +101,18 @@ async def generate_recommendations(
     for old_rec in old_result.scalars().all():
         await db.delete(old_rec)
 
-    # Store new recommendations
+    # Store new recommendations. The @handle goes in youtube_channel_id so
+    # the client can one-tap subscribe (the subscribe endpoint resolves it).
     new_recs: list[Recommendation] = []
     for s in suggestions:
+        handle = s.get("handle")
+        if not (isinstance(handle, str) and handle.strip()):
+            handle = None
         rec = Recommendation(
             id=str(uuid.uuid4()),
             user_id=user.id,
             channel_name=s.get("channel_name", "Unknown"),
+            youtube_channel_id=handle,
             reason=s.get("reason", ""),
         )
         db.add(rec)

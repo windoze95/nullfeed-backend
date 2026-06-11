@@ -1,9 +1,10 @@
-from datetime import datetime, timezone
+from datetime import datetime
 
 from sqlalchemy import DateTime, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models import Base
+from app.utils.time import utcnow_naive
 
 
 class UserSubscription(Base):
@@ -15,9 +16,7 @@ class UserSubscription(Base):
     channel_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("channels.id"), primary_key=True
     )
-    subscribed_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc)
-    )
+    subscribed_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow_naive)
     retention_policy: Mapped[str] = mapped_column(String(20), default="KEEP_ALL")
     retention_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     tracking_mode: Mapped[str] = mapped_column(String(20), default="FUTURE_ONLY")

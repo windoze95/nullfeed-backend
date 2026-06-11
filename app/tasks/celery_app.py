@@ -18,6 +18,10 @@ celery_app.conf.update(
     worker_concurrency=settings.download_concurrency,
     task_acks_late=True,
     worker_prefetch_multiplier=1,
+    # Long downloads (>1h) must not be redelivered to another worker while
+    # still running; with acks_late the Redis broker redelivers after the
+    # visibility timeout. 12 hours gives ample headroom.
+    broker_transport_options={"visibility_timeout": 43200},
 )
 
 # Periodic tasks

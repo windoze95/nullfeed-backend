@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 from collections.abc import AsyncGenerator
 
@@ -8,9 +9,32 @@ from fastapi.staticfiles import StaticFiles
 
 import os
 
-from app.api import auth, channels, discover, feed, health, videos, websocket
+from app.api import auth, channels, discover, feed, health, videos, websocket, youtube
 from app.config import settings
 from app.services.progress_broadcaster import start_progress_listener
+
+logger = logging.getLogger(__name__)
+
+
+async def _run_progress_listener() -> None:
+    """Run the Redis progress listener, reconnecting with backoff on failure."""
+    delay = 1.0
+    while True:
+        try:
+            await start_progress_listener()
+            # Clean return: the listener handles cancellation internally.
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "Progress listener error; reconnecting in %.0fs",
+                delay,
+                exc_info=True,
+            )
+        await asyncio.sleep(delay)
+        delay = min(delay * 2, 60.0)
+
 
 # Ensure data directories exist before mounting StaticFiles
 for _p in [
@@ -35,7 +59,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     ]:
         os.makedirs(path, exist_ok=True)
 
-    progress_task = asyncio.create_task(start_progress_listener())
+    progress_task = asyncio.create_task(_run_progress_listener())
 
     yield
 
@@ -78,6 +102,7 @@ app.include_router(videos.router)
 app.include_router(feed.router)
 app.include_router(discover.router)
 app.include_router(websocket.router)
+app.include_router(youtube.router)
 
 
 @app.get("/")

@@ -79,6 +79,14 @@ async def check_and_delete_orphan(video_id: str, db: AsyncSession) -> bool:
             except OSError:
                 pass
 
+    # Reset the video row so it reflects the on-disk state (re-downloadable).
+    video.status = "CATALOGED"
+    video.file_path = None
+    video.file_size_bytes = None
+    video.preview_file_path = None
+    video.preview_status = None
+    await db.commit()
+
     logger.info(
         "Orphan cleanup complete for video %s (%s)",
         video_id,
