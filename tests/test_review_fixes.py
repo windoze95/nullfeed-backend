@@ -201,3 +201,25 @@ def test_extract_channel_id_accepts_bare_handle_and_uc_id():
         == "UCBJycsmduvYEL83R_U4JriQ"
     )
     assert _extract_channel_id("not a channel") is None
+
+
+# --- cataloged videos sort by catalog time when upload date is unknown -------
+
+
+async def test_channel_videos_nulls_uploaded_at_sort_first(client, make_user):
+    from datetime import datetime, timedelta
+
+    user, headers = await make_user()
+    async with async_session_factory() as db:
+        channel = await seed_channel(db)
+        old = await seed_video(
+            db, channel, title="Old", uploaded_at=datetime(2026, 3, 3)
+        )
+        fresh = await seed_video(db, channel, title="Fresh Catalog")
+        fresh.uploaded_at = None
+        fresh.created_at = old.created_at + timedelta(days=90)
+        await db.commit()
+
+    resp = await client.get(f"/api/channels/{channel.id}/videos", headers=headers)
+    titles = [v["title"] for v in resp.json()["items"]]
+    assert titles == ["Fresh Catalog", "Old"]

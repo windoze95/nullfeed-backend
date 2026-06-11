@@ -85,3 +85,37 @@ def test_refresh_keeps_existing_name(mock_meta, mock_images):
 
     # Name should NOT be overwritten
     assert channel.name == "My Custom Name"
+
+
+def test_cataloged_batch_preserves_feed_order(monkeypatch):
+    """Within one poll, newer feed entries get later created_at stamps."""
+    from sqlalchemy import create_engine, select
+    from sqlalchemy.orm import sessionmaker
+
+    from app.models import Base
+    from app.models.video import Video
+    from app.services import channel_poller
+    from app.utils.time import utcnow_naive
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    channel = _make_channel(last_checked_at=utcnow_naive())
+    db.add(channel)
+    db.commit()
+
+    feed = {
+        "videos": [
+            {"youtube_video_id": "newest01234", "title": "Newest"},
+            {"youtube_video_id": "middle01234", "title": "Middle"},
+            {"youtube_video_id": "oldest01234", "title": "Oldest"},
+        ]
+    }
+    monkeypatch.setattr(channel_poller, "fetch_channel_videos", lambda _: feed)
+
+    channel_poller.poll_single_channel(channel.id, db)
+
+    rows = db.execute(select(Video)).scalars().all()
+    by_title = {v.title: v.created_at for v in rows}
+    assert by_title["Newest"] > by_title["Middle"] > by_title["Oldest"]
+    db.close()
