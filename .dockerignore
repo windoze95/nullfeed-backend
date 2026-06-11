@@ -1,0 +1,14 @@
+# Runtime data is mounted as volumes — never baked into the image.
+data/
+
+# Local dev artifacts
+.venv/
+.git/
+.github/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+tests/
+.env
