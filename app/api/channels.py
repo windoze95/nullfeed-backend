@@ -24,8 +24,14 @@ from app.schemas.channel import (
     ChannelSubscribe,
 )
 from app.schemas.video import VideoOut, VideoPagination
+from app.services.channel_poller import poll_single_channel
 from app.services.download_manager import fetch_channel_images, fetch_channel_metadata
-from app.tasks.download_tasks import poll_channel_task
+from app.tasks.download_tasks import (
+    _get_sync_db,
+    download_video_task,
+    poll_all_channels_task,
+    poll_channel_task,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -287,6 +293,61 @@ async def _subscribe_bulk_item(
         status="subscribed",
         channel_id=channel.id,
     )
+
+
+@router.post("/poll")
+async def poll_all_channels_now(
+    user: User = Depends(get_current_user),
+) -> dict:
+    """Kick off a background poll of every channel (pull-to-refresh)."""
+    try:
+        poll_all_channels_task.delay()
+    except Exception:
+        logger.exception("Could not enqueue poll-all task")
+        raise HTTPException(status_code=502, detail="Could not start poll")
+    return {"detail": "Poll started"}
+
+
+@router.post("/{channel_id}/poll")
+async def poll_channel_now(
+    channel_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Poll one channel synchronously so pull-to-refresh shows new uploads.
+
+    A single-channel poll is one yt-dlp call (a few seconds) — fast enough
+    to run inline. Auto-download candidates are enqueued exactly as the
+    scheduled poll task does.
+    """
+    result = await db.execute(select(Channel.id).where(Channel.id == channel_id))
+    if result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Channel not found")
+
+    def _run() -> dict:
+        sync_db = _get_sync_db()
+        try:
+            poll_result = poll_single_channel(channel_id, sync_db)
+        finally:
+            sync_db.close()
+        enqueue_failures = 0
+        for video_id in poll_result["auto_download_ids"]:
+            try:
+                download_video_task.delay(video_id)
+            except Exception:
+                enqueue_failures += 1
+                logger.exception("Could not enqueue auto-download %s", video_id)
+        return {
+            "detail": "Polled",
+            "cataloged": len(poll_result["cataloged_ids"]),
+            "auto_downloads": len(poll_result["auto_download_ids"]) - enqueue_failures,
+        }
+
+    try:
+        return await asyncio.to_thread(_run)
+    except Exception:
+        logger.exception("Poll failed for channel %s", channel_id)
+        raise HTTPException(status_code=502, detail="Poll failed")
 
 
 @router.post("/{channel_id}/refresh-images", response_model=ChannelDetail)

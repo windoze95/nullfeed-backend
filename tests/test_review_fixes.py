@@ -223,3 +223,47 @@ async def test_channel_videos_nulls_uploaded_at_sort_first(client, make_user):
     resp = await client.get(f"/api/channels/{channel.id}/videos", headers=headers)
     titles = [v["title"] for v in resp.json()["items"]]
     assert titles == ["Fresh Catalog", "Old"]
+
+
+# --- pull-to-refresh poll endpoints -------------------------------------------
+
+
+async def test_poll_channel_now_runs_poller_and_enqueues(
+    client, make_user, monkeypatch
+):
+    _, headers = await make_user()
+    async with async_session_factory() as db:
+        channel = await seed_channel(db)
+
+    poll_mock = MagicMock(
+        return_value={"cataloged_ids": ["a", "b"], "auto_download_ids": ["a"]}
+    )
+    delay_mock = MagicMock()
+    monkeypatch.setattr("app.api.channels.poll_single_channel", poll_mock)
+    monkeypatch.setattr("app.api.channels.download_video_task.delay", delay_mock)
+
+    resp = await client.post(f"/api/channels/{channel.id}/poll", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json() == {"detail": "Polled", "cataloged": 2, "auto_downloads": 1}
+    poll_mock.assert_called_once()
+    delay_mock.assert_called_once_with("a")
+
+
+async def test_poll_channel_now_unknown_channel_404(client, make_user):
+    _, headers = await make_user()
+    resp = await client.post("/api/channels/nope/poll", headers=headers)
+    assert resp.status_code == 404
+
+
+async def test_poll_all_endpoint_enqueues_task(client, make_user, monkeypatch):
+    _, headers = await make_user()
+    delay_mock = MagicMock()
+    monkeypatch.setattr("app.api.channels.poll_all_channels_task.delay", delay_mock)
+    resp = await client.post("/api/channels/poll", headers=headers)
+    assert resp.status_code == 200
+    delay_mock.assert_called_once()
+
+
+async def test_poll_endpoints_require_auth(client):
+    assert (await client.post("/api/channels/poll")).status_code == 401
+    assert (await client.post("/api/channels/x/poll")).status_code == 401
