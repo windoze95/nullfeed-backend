@@ -9,7 +9,9 @@ from app.utils.time import utcnow_naive
 
 class UserVideoRef(Base):
     __tablename__ = "user_video_refs"
-    __table_args__ = (Index("ix_user_video_refs_removed", "removed_at"),)
+    __table_args__ = (
+        Index("ix_user_video_refs_video_id_removed", "video_id", "removed_at"),
+    )
 
     user_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("users.id"), primary_key=True

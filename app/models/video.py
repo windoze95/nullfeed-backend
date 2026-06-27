@@ -33,4 +33,4 @@ class Video(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow_naive)
 
     channel = relationship("Channel", back_populates="videos")
-    user_refs = relationship("UserVideoRef", back_populates="video", lazy="selectin")
+    user_refs = relationship("UserVideoRef", back_populates="video", lazy="select")
