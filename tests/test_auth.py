@@ -3,19 +3,23 @@
 import hashlib
 import os
 import uuid
+from datetime import timedelta
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
 import app.services.youtube_import as youtube_import
+from app.api.auth import _hash_token
 from app.config import settings
 from app.database import async_session_factory, engine
 from app.main import app
+from app.models.session import Session as SessionModel
 from app.models.subscription import UserSubscription
 from app.models.user import User
 from app.models.user_video_ref import UserVideoRef
 from app.models.video import Video
+from app.utils.time import utcnow_naive
 from tests.helpers import (
     IDENTITY_JSON,
     fake_completed_process,
@@ -319,3 +323,87 @@ async def test_create_from_youtube_handle_resolve_failure_502(client, monkeypatc
     resp = await client.post("/api/auth/create", json={"youtube_handle": "@nope"})
     assert resp.status_code == 502
     assert resp.json()["detail"] == "Could not resolve YouTube handle"
+
+
+# --- session expiry (absolute + idle) --------------------------------------
+
+
+async def _set_session_times(token: str, *, created_at, last_seen_at) -> None:
+    """Force a session's timestamps so expiry boundaries can be exercised."""
+    async with async_session_factory() as db:
+        session = (
+            await db.execute(
+                select(SessionModel).where(
+                    SessionModel.token_hash == _hash_token(token)
+                )
+            )
+        ).scalar_one()
+        session.created_at = created_at
+        session.last_seen_at = last_seen_at
+        await db.commit()
+
+
+async def test_session_rejected_past_absolute_ttl(client, make_user):
+    _, headers = await make_user("Ancient")
+    now = utcnow_naive()
+    # Old creation but recent activity: only the absolute limit should trip.
+    await _set_session_times(
+        headers["X-User-Token"],
+        created_at=now - timedelta(days=settings.session_absolute_ttl_days + 1),
+        last_seen_at=now,
+    )
+    resp = await client.get("/api/auth/me", headers=headers)
+    assert resp.status_code == 401
+
+
+async def test_session_rejected_when_idle_too_long(client, make_user):
+    _, headers = await make_user("Idle")
+    now = utcnow_naive()
+    # Recent creation but stale activity: only the idle limit should trip.
+    await _set_session_times(
+        headers["X-User-Token"],
+        created_at=now,
+        last_seen_at=now - timedelta(days=settings.session_idle_ttl_days + 1),
+    )
+    resp = await client.get("/api/auth/me", headers=headers)
+    assert resp.status_code == 401
+
+
+async def test_session_within_ttls_still_valid(client, make_user):
+    _, headers = await make_user("Active")
+    now = utcnow_naive()
+    # Comfortably inside both windows.
+    await _set_session_times(
+        headers["X-User-Token"],
+        created_at=now - timedelta(days=settings.session_absolute_ttl_days - 1),
+        last_seen_at=now - timedelta(days=settings.session_idle_ttl_days - 1),
+    )
+    resp = await client.get("/api/auth/me", headers=headers)
+    assert resp.status_code == 200
+
+
+async def test_logout_all_devices_revokes_every_session(client, make_user):
+    profile, headers = await make_user("Multi", pin="1234")
+
+    # Open a second concurrent session for the same user.
+    resp = await client.post(
+        "/api/auth/select", json={"user_id": profile["id"], "pin": "1234"}
+    )
+    assert resp.status_code == 200
+    second_headers = {"X-User-Token": resp.json()["token"]}
+
+    # Both sessions are valid to start.
+    assert (await client.get("/api/auth/me", headers=headers)).status_code == 200
+    assert (await client.get("/api/auth/me", headers=second_headers)).status_code == 200
+
+    # Revoking via either session must drop them all.
+    resp = await client.delete("/api/auth/sessions", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json() == {"detail": "All sessions revoked"}
+
+    assert (await client.get("/api/auth/me", headers=headers)).status_code == 401
+    assert (await client.get("/api/auth/me", headers=second_headers)).status_code == 401
+
+
+async def test_logout_all_devices_requires_auth(client):
+    assert (await client.delete("/api/auth/sessions")).status_code == 401

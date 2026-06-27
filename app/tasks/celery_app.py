@@ -41,4 +41,10 @@ celery_app.conf.beat_schedule = {
         "task": "app.tasks.download_tasks.reap_stuck_downloads_task",
         "schedule": 300,  # every 5 minutes
     },
+    # Sweep expired auth sessions so the sessions table cannot grow without
+    # bound. Cheap (a single indexed DELETE); hourly is plenty.
+    "reap-expired-sessions": {
+        "task": "app.tasks.download_tasks.reap_expired_sessions_task",
+        "schedule": 3600,  # hourly
+    },
 }

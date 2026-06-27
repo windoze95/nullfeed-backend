@@ -6,7 +6,7 @@ import os
 import secrets
 import time
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -113,8 +113,24 @@ def _clear_pin_failures(user_id: str) -> None:
     _pin_lockouts.pop(user_id, None)
 
 
+def _session_is_expired(session: Session, now: datetime) -> bool:
+    """True once a session is past its absolute lifetime or has gone idle."""
+    absolute_ttl = timedelta(days=settings.session_absolute_ttl_days)
+    idle_ttl = timedelta(days=settings.session_idle_ttl_days)
+    if session.created_at is not None and now - session.created_at >= absolute_ttl:
+        return True
+    if session.last_seen_at is not None and now - session.last_seen_at >= idle_ttl:
+        return True
+    return False
+
+
 async def _resolve_session(token: str, db: AsyncSession) -> Session | None:
-    """Look up a persistent session by raw token; refresh last_seen_at hourly."""
+    """Resolve a session by raw token, enforcing absolute + idle expiry.
+
+    Returns None for a missing OR expired session; every caller treats that as
+    unauthenticated. Live sessions get last_seen_at refreshed at most hourly to
+    bound write volume; expired rows are deleted out-of-band by the reaper.
+    """
     result = await db.execute(
         select(Session).where(Session.token_hash == _hash_token(token))
     )
@@ -122,6 +138,8 @@ async def _resolve_session(token: str, db: AsyncSession) -> Session | None:
     if session is None:
         return None
     now = utcnow_naive()
+    if _session_is_expired(session, now):
+        return None
     if session.last_seen_at is None or now - session.last_seen_at >= _LAST_SEEN_REFRESH:
         session.last_seen_at = now
         await db.commit()
@@ -276,6 +294,17 @@ async def logout(
         )
         await db.commit()
     return {"detail": "Logged out"}
+
+
+@router.delete("/sessions")
+async def logout_all_devices(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Revoke every session for the current user (log out all devices)."""
+    await db.execute(delete(Session).where(Session.user_id == user.id))
+    await db.commit()
+    return {"detail": "All sessions revoked"}
 
 
 @router.patch("/profiles/{user_id}", response_model=UserProfile)
