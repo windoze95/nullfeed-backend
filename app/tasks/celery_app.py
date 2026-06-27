@@ -34,4 +34,11 @@ celery_app.conf.beat_schedule = {
         "task": "app.tasks.download_tasks.refresh_stale_channel_metadata_task",
         "schedule": settings.metadata_refresh_interval_hours * 3600,
     },
+    # Self-heal downloads stranded by a crashed worker. Frequent and cheap (a
+    # single indexed query); recovery latency is this interval plus the reaper's
+    # staleness threshold.
+    "reap-stuck-downloads": {
+        "task": "app.tasks.download_tasks.reap_stuck_downloads_task",
+        "schedule": 300,  # every 5 minutes
+    },
 }

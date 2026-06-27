@@ -3,7 +3,7 @@ from datetime import timedelta
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import Response
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -21,6 +21,28 @@ from app.tasks.download_tasks import download_preview_task, download_video_task
 from app.utils.time import utcnow_naive
 
 router = APIRouter(prefix="/api/videos", tags=["videos"])
+
+
+async def _ensure_active_ref(db: AsyncSession, user_id: str, video_id: str) -> None:
+    """Register (or reactivate) the caller's claim on a video.
+
+    The set of active (``removed_at IS NULL``) UserVideoRefs is the download's
+    reference count, so any endpoint that expresses "I want this video" must
+    leave the caller holding an active ref. Idempotent: creates the ref if
+    missing, clears ``removed_at`` if it was soft-deleted, and leaves an
+    already-active ref untouched.
+    """
+    now = utcnow_naive()
+    stmt = (
+        sqlite_insert(UserVideoRef)
+        .values(user_id=user_id, video_id=video_id, added_at=now, removed_at=None)
+        .on_conflict_do_update(
+            index_elements=["user_id", "video_id"],
+            set_={"removed_at": None},
+        )
+    )
+    await db.execute(stmt)
+    await db.commit()
 
 
 @router.get("/downloads", response_model=list[VideoOut])
@@ -121,6 +143,12 @@ async def trigger_download(
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
 
+    # Ownership: the caller now wants this (shared) video, so register their ref
+    # before anything else. This keeps the download ref-counted symmetrically
+    # with cancel, and attaches the caller to a download another user may have
+    # already started. Committed up front so it survives the 409 paths below.
+    await _ensure_active_ref(db, user.id, video_id)
+
     if video.status in ("PENDING", "DOWNLOADING"):
         raise HTTPException(status_code=409, detail="Download already in progress")
     if video.status == "CANCELLING":
@@ -150,23 +178,65 @@ async def cancel_download(
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
 
+    # Escape hatch (also covered by the reaper): cancelling a row that is
+    # already CANCELLING force-clears a teardown whose worker never confirmed it
+    # (e.g. the worker died mid-cancel). This is a recovery action, independent
+    # of ref-counting.
     if video.status == "CANCELLING":
-        # Escape hatch: a second cancel force-clears a cancel whose worker
-        # never confirmed (e.g. the worker died mid-download).
         video.status = "CATALOGED"
         await db.commit()
         return {"detail": "Download cancelled", "video_id": video_id}
 
+    # Drop ONLY the caller's intent — never another user's. The shared download
+    # is ref-counted by the set of active UserVideoRefs.
+    ref_result = await db.execute(
+        select(UserVideoRef).where(
+            UserVideoRef.user_id == user.id,
+            UserVideoRef.video_id == video_id,
+            UserVideoRef.removed_at.is_(None),
+        )
+    )
+    ref = ref_result.scalar_one_or_none()
+    if ref is not None:
+        ref.removed_at = utcnow_naive()
+        await db.commit()
+
+    # Not an active download? Nothing to interrupt, but dropping the ref may have
+    # orphaned an existing file — reuse the orphan check to remove it if so.
     if video.status not in ("PENDING", "DOWNLOADING"):
+        await check_and_delete_orphan(video_id, db)
         return {"detail": "Not in progress", "video_id": video_id}
 
-    # PENDING tasks never started — the worker's start guard skips CATALOGED.
-    # An in-flight download moves to CANCELLING until the worker confirms it
-    # has killed yt-dlp and cleaned up, blocking a concurrent re-download.
-    video.status = "CATALOGED" if video.status == "PENDING" else "CANCELLING"
+    # Only tear down the shared download when nobody is left who wants it. This
+    # also covers the scheduler: it downloads on subscribers' behalf, and those
+    # subscribers hold the refs, so their refs keep the download alive.
+    remaining = await db.scalar(
+        select(func.count())
+        .select_from(UserVideoRef)
+        .where(
+            UserVideoRef.video_id == video_id,
+            UserVideoRef.removed_at.is_(None),
+        )
+    )
+    if remaining and remaining > 0:
+        return {
+            "detail": "Cancelled for you; download continues for others",
+            "video_id": video_id,
+            "stopped": False,
+        }
+
+    # No active refs remain: truly cancel the shared download.
+    if video.status == "PENDING":
+        # Never started — the worker's start guard skips a CATALOGED row.
+        video.status = "CATALOGED"
+    else:  # DOWNLOADING
+        # Hand off to the worker: its cancel_check kills yt-dlp, cleans up
+        # partial files, then confirms CANCELLING -> CATALOGED. Blocks a
+        # concurrent re-download until the teardown completes.
+        video.status = "CANCELLING"
     await db.commit()
 
-    return {"detail": "Download cancelled", "video_id": video_id}
+    return {"detail": "Download cancelled", "video_id": video_id, "stopped": True}
 
 
 @router.post("/{video_id}/preview")

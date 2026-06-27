@@ -30,6 +30,14 @@ class Video(Base):
     preview_file_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     preview_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
     downloaded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Liveness signal for an in-flight download: set when the row enters
+    # DOWNLOADING and refreshed by the worker as yt-dlp produces output. The
+    # reaper treats a DOWNLOADING/CANCELLING row whose heartbeat has gone stale
+    # as stranded by a crashed worker and resets it. NULL means "no download
+    # has touched this row since the column was added".
+    download_heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow_naive)
 
     channel = relationship("Channel", back_populates="videos")
