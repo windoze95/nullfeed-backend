@@ -3,9 +3,12 @@ import logging
 from contextlib import asynccontextmanager
 from collections.abc import AsyncGenerator
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 import os
 
@@ -107,6 +110,73 @@ app.include_router(feed.router)
 app.include_router(discover.router)
 app.include_router(websocket.router)
 app.include_router(youtube.router)
+
+
+# ---------------------------------------------------------------------------
+# Normalized error envelope (#3)
+#
+# Every error response is flattened to {"detail": <human string>, "code":
+# <machine code>}. Crucially `detail` stays a STRING: FastAPI's default 422
+# body nests a list under `detail`, which breaks clients that read it as a
+# string. Existing string `detail` messages are preserved verbatim, so clients
+# already reading `detail` keep working and only gain a stable machine `code`.
+
+_ERROR_CODES = {
+    400: "bad_request",
+    401: "unauthorized",
+    403: "forbidden",
+    404: "not_found",
+    405: "method_not_allowed",
+    409: "conflict",
+    422: "validation_error",
+    429: "rate_limited",
+    500: "internal_error",
+    502: "bad_gateway",
+    503: "service_unavailable",
+    504: "gateway_timeout",
+}
+
+
+def _code_for_status(status_code: int) -> str:
+    return _ERROR_CODES.get(status_code, f"http_{status_code}")
+
+
+def _humanize_validation_errors(exc: RequestValidationError) -> str:
+    """Flatten pydantic/FastAPI validation errors into one readable string."""
+    parts: list[str] = []
+    for err in exc.errors():
+        # Drop the leading location group ("body"/"query"/"path") for brevity.
+        loc = [str(p) for p in err.get("loc", ()) if p not in ("body", "query", "path")]
+        msg = err.get("msg", "Invalid value")
+        # Pydantic prefixes custom ValueError messages with "Value error, ".
+        msg = msg.removeprefix("Value error, ")
+        parts.append(f"{'.'.join(loc)}: {msg}" if loc else msg)
+    return "; ".join(parts) or "Invalid request"
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_exception_handler(
+    request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": _humanize_validation_errors(exc),
+            "code": "validation_error",
+        },
+    )
+
+
+@app.exception_handler(StarletteHTTPException)
+async def _http_exception_handler(
+    request: Request, exc: StarletteHTTPException
+) -> JSONResponse:
+    detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": detail, "code": _code_for_status(exc.status_code)},
+        headers=getattr(exc, "headers", None),
+    )
 
 
 @app.get("/")
