@@ -26,7 +26,7 @@ class Channel(Base):
         DateTime, nullable=True
     )
 
-    videos = relationship("Video", back_populates="channel", lazy="selectin")
+    videos = relationship("Video", back_populates="channel", lazy="select")
     subscriptions = relationship(
-        "UserSubscription", back_populates="channel", lazy="selectin"
+        "UserSubscription", back_populates="channel", lazy="select"
     )

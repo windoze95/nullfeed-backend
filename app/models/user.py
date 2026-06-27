@@ -21,9 +21,9 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow_naive)
 
     subscriptions = relationship(
-        "UserSubscription", back_populates="user", lazy="selectin"
+        "UserSubscription", back_populates="user", lazy="select"
     )
-    video_refs = relationship("UserVideoRef", back_populates="user", lazy="selectin")
+    video_refs = relationship("UserVideoRef", back_populates="user", lazy="select")
 
     @property
     def has_pin(self) -> bool:
