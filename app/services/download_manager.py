@@ -5,6 +5,7 @@ import shutil
 import signal
 import subprocess
 import json
+import threading
 import time
 from collections.abc import Callable
 
@@ -13,6 +14,22 @@ import httpx
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+# --- Download watchdog tuning ---------------------------------------------
+# A live yt-dlp/aria2c download prints stdout lines constantly while fetching,
+# plus a short quiet spell around the post-download stream-copy merge. A gap
+# longer than this means the process is wedged (dead socket, hung aria2c) rather
+# than busy, so we kill it. Generous enough to cover a slow merge of a large
+# file that produces no progress output.
+NO_OUTPUT_TIMEOUT_SECONDS = 300
+
+# Absolute ceiling on a single download regardless of progress. A legitimate
+# large download on a slow link can run long, so this is deliberately generous;
+# the Celery soft/hard time limits sit just above it as a coarser backstop.
+OVERALL_DEADLINE_SECONDS = 4 * 3600
+
+# How often the watchdog thread wakes to evaluate the timers and cancel flag.
+WATCHDOG_POLL_INTERVAL_SECONDS = 5.0
 
 
 class DownloadCancelled(Exception):
@@ -27,21 +44,93 @@ def _kill_process_group(process: subprocess.Popen) -> None:
         process.kill()
 
 
+class _DownloadWatchdog(threading.Thread):
+    """Kills a wedged download from a side thread.
+
+    The main thread blocks reading yt-dlp stdout line by line, which on its own
+    cannot detect a *silent* hang (process alive, socket dead, no output and no
+    EOF). This thread watches three conditions and kills the process group when
+    any trips; killing it closes the pipe and unblocks the reader. The reader
+    then inspects ``reason`` to decide what to raise.
+
+      * no stdout for ``no_output_timeout`` seconds -> "no_output"
+      * total runtime past ``overall_deadline`` seconds -> "deadline"
+      * ``cancel_check()`` returns True (cancelled via the API) -> "cancelled"
+    """
+
+    def __init__(
+        self,
+        process: subprocess.Popen,
+        cancel_check: Callable[[], bool] | None = None,
+        no_output_timeout: float = NO_OUTPUT_TIMEOUT_SECONDS,
+        overall_deadline: float = OVERALL_DEADLINE_SECONDS,
+        poll_interval: float = WATCHDOG_POLL_INTERVAL_SECONDS,
+    ) -> None:
+        super().__init__(daemon=True)
+        self._process = process
+        self._cancel_check = cancel_check
+        self._no_output_timeout = no_output_timeout
+        self._overall_deadline = overall_deadline
+        self._poll_interval = poll_interval
+        self._started_at = time.monotonic()
+        self._last_output_at = self._started_at
+        self._stop = threading.Event()
+        self.reason: str | None = None
+
+    def note_output(self) -> None:
+        """Record that the reader just saw a line (resets the stall timer)."""
+        self._last_output_at = time.monotonic()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def run(self) -> None:
+        while not self._stop.wait(self._poll_interval):
+            if self._process.poll() is not None:
+                return  # process exited on its own; the reader is draining EOF
+            now = time.monotonic()
+            if self._cancel_check is not None:
+                try:
+                    cancelled = self._cancel_check()
+                except Exception:
+                    cancelled = False
+                if cancelled:
+                    self.reason = "cancelled"
+                    _kill_process_group(self._process)
+                    return
+            if now - self._last_output_at > self._no_output_timeout:
+                self.reason = "no_output"
+                _kill_process_group(self._process)
+                return
+            if now - self._started_at > self._overall_deadline:
+                self.reason = "deadline"
+                _kill_process_group(self._process)
+                return
+
+
 def download_video(
     youtube_video_id: str,
     channel_slug: str,
     quality: str | None = None,
     progress_callback: Callable[[float], None] | None = None,
     cancel_check: Callable[[], bool] | None = None,
+    heartbeat_callback: Callable[[], None] | None = None,
 ) -> dict:
     """
     Download a video using yt-dlp. Returns metadata dict on success.
 
-    `cancel_check` is polled every ~5s while the download runs; when it
-    returns True, yt-dlp is killed, partial files are cleaned up, and
+    A watchdog thread runs alongside the stdout reader and kills yt-dlp if the
+    download stalls (no output for NO_OUTPUT_TIMEOUT_SECONDS), runs past
+    OVERALL_DEADLINE_SECONDS, or is cancelled. `cancel_check` is polled every
+    ~5s by that thread, so cancellation works even during a silent hang; when
+    it returns True, yt-dlp is killed, partial files are cleaned up, and
     DownloadCancelled is raised.
 
-    Raises RuntimeError on failure, DownloadCancelled on cancellation.
+    `heartbeat_callback` (if given) is invoked on every stdout line so the
+    caller can record a liveness timestamp the reaper can use to detect a
+    crashed worker.
+
+    Raises RuntimeError on failure or stall, DownloadCancelled on cancellation.
     """
     quality = quality or settings.media_quality
     output_dir = os.path.join(settings.media_path, channel_slug)
@@ -97,25 +186,26 @@ def download_video(
     # aria2c:        [#abc 1.7MiB/81MiB(2%) ...]
     progress_re = re.compile(r"\[download\]\s+([\d.]+)%|\((\d+)%\)")
     last_callback_time = 0.0
-    last_cancel_check_time = time.monotonic()
     last_line = ""
 
+    # Read the tuning constants at call time (not via the watchdog's default
+    # args, which bind at import) so they can be overridden in tests.
+    watchdog = _DownloadWatchdog(
+        process,
+        cancel_check=cancel_check,
+        no_output_timeout=NO_OUTPUT_TIMEOUT_SECONDS,
+        overall_deadline=OVERALL_DEADLINE_SECONDS,
+        poll_interval=WATCHDOG_POLL_INTERVAL_SECONDS,
+    )
+    watchdog.start()
+    stdout_lines = iter(process.stdout.readline, "") if process.stdout else iter(())
     try:
-        for line in process.stdout or []:
+        for line in stdout_lines:
+            watchdog.note_output()
             last_line = line
 
-            # Poll for cancellation every ~5s while output is flowing
-            if cancel_check is not None:
-                now = time.monotonic()
-                if now - last_cancel_check_time >= 5.0:
-                    last_cancel_check_time = now
-                    if cancel_check():
-                        _kill_process_group(process)
-                        process.wait()
-                        _cleanup_partial_files(output_dir, youtube_video_id)
-                        raise DownloadCancelled(
-                            f"Download cancelled for {youtube_video_id}"
-                        )
+            if heartbeat_callback is not None:
+                heartbeat_callback()
 
             m = progress_re.search(line)
             if m and progress_callback is not None:
@@ -125,11 +215,43 @@ def download_video(
                     pct = float(m.group(1) or m.group(2))
                     progress_callback(pct)
 
-        process.wait(timeout=3600)
+        # The reader saw EOF: either yt-dlp finished or the watchdog killed it.
+        # The process is already exiting, so this wait should return promptly.
+        process.wait(timeout=60)
     except subprocess.TimeoutExpired:
         _kill_process_group(process)
         process.wait()
-        raise RuntimeError(f"yt-dlp timed out for {youtube_video_id}")
+        raise RuntimeError(
+            f"yt-dlp did not exit after stream close: {youtube_video_id}"
+        )
+    finally:
+        watchdog.stop()
+        watchdog.join(timeout=10)
+        # Belt and suspenders: never leave yt-dlp/aria2c running if we bail out
+        # for any reason the loop above didn't handle (e.g. a Celery time-limit
+        # signal raising through the reader).
+        if process.poll() is None:
+            _kill_process_group(process)
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass
+
+    if watchdog.reason == "cancelled":
+        _cleanup_partial_files(output_dir, youtube_video_id)
+        raise DownloadCancelled(f"Download cancelled for {youtube_video_id}")
+    if watchdog.reason == "no_output":
+        _cleanup_partial_files(output_dir, youtube_video_id)
+        raise RuntimeError(
+            f"Download stalled (no output for {NO_OUTPUT_TIMEOUT_SECONDS}s): "
+            f"{youtube_video_id}"
+        )
+    if watchdog.reason == "deadline":
+        _cleanup_partial_files(output_dir, youtube_video_id)
+        raise RuntimeError(
+            f"Download exceeded {OVERALL_DEADLINE_SECONDS}s deadline: "
+            f"{youtube_video_id}"
+        )
 
     if process.returncode != 0:
         logger.error("yt-dlp failed for %s: %s", youtube_video_id, last_line)

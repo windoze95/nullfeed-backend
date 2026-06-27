@@ -1,8 +1,10 @@
 import logging
 import os
+import time
 from datetime import datetime
 
-from sqlalchemy import create_engine, select
+from celery.signals import worker_ready
+from sqlalchemy import create_engine, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import settings
@@ -17,10 +19,12 @@ from app.services.channel_poller import (
     refresh_stale_channel_metadata,
 )
 from app.services.download_manager import (
+    OVERALL_DEADLINE_SECONDS,
     DownloadCancelled,
     download_preview,
     download_video,
 )
+from app.services.download_reaper import reap_stuck_downloads
 from app.utils.time import utcnow_naive
 from app.services.progress_broadcaster import (
     publish_download_complete,
@@ -29,6 +33,11 @@ from app.services.progress_broadcaster import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Throttle how often the worker writes a download heartbeat to the DB. yt-dlp
+# emits output far more often than this; we only need a periodic liveness mark
+# for the reaper, not a write per line.
+HEARTBEAT_WRITE_INTERVAL_SECONDS = 30.0
 
 # Synchronous engine for Celery tasks
 _engine = create_engine(
@@ -120,6 +129,12 @@ def refresh_stale_channel_metadata_task(self) -> dict:
     autoretry_for=(RuntimeError,),
     retry_backoff=True,
     retry_backoff_max=600,
+    # Backstop for a task the in-process watchdog somehow can't unstick (e.g. a
+    # hang in our own code rather than yt-dlp). Sits just above the download
+    # watchdog's overall deadline so the watchdog normally fires first and can
+    # clean up; the soft limit raises a catchable error, the hard limit kills.
+    soft_time_limit=OVERALL_DEADLINE_SECONDS + 300,
+    time_limit=OVERALL_DEADLINE_SECONDS + 420,
 )
 def download_video_task(
     self,
@@ -167,8 +182,10 @@ def download_video_task(
                 os.remove(old_path)
                 logger.info("Removed old file for re-download: %s", old_path)
 
-        # Transition to DOWNLOADING
+        # Transition to DOWNLOADING and stamp the initial heartbeat so the
+        # reaper has a fresh liveness mark from the moment the row goes active.
         video.status = "DOWNLOADING"
+        video.download_heartbeat_at = utcnow_naive()
         db.commit()
 
         # Build progress callback if we know who triggered the download
@@ -192,6 +209,32 @@ def download_video_task(
             finally:
                 check_db.close()
 
+        last_heartbeat = [time.monotonic()]
+
+        def _heartbeat() -> None:
+            """Refresh the DB heartbeat so a crashed worker becomes detectable.
+
+            Uses its own short-lived session to avoid disturbing the task's main
+            transaction, and is throttled so a chatty download isn't a write
+            storm.
+            """
+            now_m = time.monotonic()
+            if now_m - last_heartbeat[0] < HEARTBEAT_WRITE_INTERVAL_SECONDS:
+                return
+            last_heartbeat[0] = now_m
+            hb_db = _get_sync_db()
+            try:
+                hb_db.execute(
+                    update(Video)
+                    .where(Video.id == video_id)
+                    .values(download_heartbeat_at=utcnow_naive())
+                )
+                hb_db.commit()
+            except Exception:
+                logger.debug("Heartbeat update failed for video %s", video_id)
+            finally:
+                hb_db.close()
+
         # Perform the download
         result = download_video(
             youtube_video_id=video.youtube_video_id,
@@ -199,6 +242,7 @@ def download_video_task(
             quality=quality or settings.media_quality,
             progress_callback=progress_cb,
             cancel_check=_is_cancelled,
+            heartbeat_callback=_heartbeat,
         )
 
         # Update video record with results
@@ -357,3 +401,39 @@ def download_preview_task(self, video_id: str, user_id: str) -> dict:
         raise exc
     finally:
         db.close()
+
+
+@celery_app.task(
+    name="app.tasks.download_tasks.reap_stuck_downloads_task",
+    bind=True,
+    max_retries=0,
+)
+def reap_stuck_downloads_task(self) -> dict:
+    """Recover downloads stranded by a crashed/killed worker.
+
+    Runs periodically (Celery beat) and once on worker startup. Resets stale
+    DOWNLOADING rows to PENDING and re-enqueues them, and settles stale
+    CANCELLING rows to CATALOGED.
+    """
+    db = _get_sync_db()
+    try:
+        result = reap_stuck_downloads(db)
+    except Exception:
+        logger.exception("Error in reap_stuck_downloads_task")
+        return {"status": "error"}
+    finally:
+        db.close()
+
+    for video_id in result["requeue_ids"]:
+        download_video_task.delay(video_id)
+
+    return {"status": "ok", **result}
+
+
+@worker_ready.connect
+def _reap_on_worker_startup(**_kwargs: object) -> None:
+    """On worker boot, recover anything a previous (crashed) worker stranded."""
+    try:
+        reap_stuck_downloads_task.delay()
+    except Exception:
+        logger.exception("Failed to schedule startup download reap")
