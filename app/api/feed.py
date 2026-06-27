@@ -10,7 +10,7 @@ from app.models.user import User
 from app.models.user_video_ref import UserVideoRef
 from app.models.video import Video
 from app.schemas.channel import ChannelOut
-from app.schemas.feed import FeedItem
+from app.schemas.feed import FeedItem, HomeFeed
 from app.schemas.video import VideoOut
 
 router = APIRouter(prefix="/api/feed", tags=["feed"])
@@ -39,11 +39,8 @@ def _video_out(video: Video, ref: UserVideoRef | None = None) -> VideoOut:
     )
 
 
-@router.get("/continue-watching", response_model=list[FeedItem])
-async def continue_watching(
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-    limit: int = Query(20, ge=1, le=50),
+async def _continue_watching_items(
+    user: User, db: AsyncSession, limit: int
 ) -> list[FeedItem]:
     """Videos with partial progress, ordered by most recently watched."""
     result = await db.execute(
@@ -80,13 +77,10 @@ async def continue_watching(
     return items
 
 
-@router.get("/new-episodes", response_model=list[FeedItem])
-async def new_episodes(
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-    limit: int = Query(20, ge=1, le=50),
+async def _new_episodes_items(
+    user: User, db: AsyncSession, limit: int
 ) -> list[FeedItem]:
-    """Channels that have unwatched downloads for this user."""
+    """Newest unwatched download per subscribed channel for this user."""
     # Get user's subscribed channel IDs
     sub_result = await db.execute(
         select(UserSubscription.channel_id).where(UserSubscription.user_id == user.id)
@@ -129,11 +123,8 @@ async def new_episodes(
     return items
 
 
-@router.get("/recently-added", response_model=list[FeedItem])
-async def recently_added(
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-    limit: int = Query(20, ge=1, le=50),
+async def _recently_added_items(
+    user: User, db: AsyncSession, limit: int
 ) -> list[FeedItem]:
     """Chronological list of newly downloaded videos across subscribed channels."""
     result = await db.execute(
@@ -160,3 +151,51 @@ async def recently_added(
         )
         for ref, video, channel in rows
     ]
+
+
+@router.get("/continue-watching", response_model=list[FeedItem])
+async def continue_watching(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    limit: int = Query(20, ge=1, le=50),
+) -> list[FeedItem]:
+    """Videos with partial progress, ordered by most recently watched."""
+    return await _continue_watching_items(user, db, limit)
+
+
+@router.get("/new-episodes", response_model=list[FeedItem])
+async def new_episodes(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    limit: int = Query(20, ge=1, le=50),
+) -> list[FeedItem]:
+    """Channels that have unwatched downloads for this user."""
+    return await _new_episodes_items(user, db, limit)
+
+
+@router.get("/recently-added", response_model=list[FeedItem])
+async def recently_added(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    limit: int = Query(20, ge=1, le=50),
+) -> list[FeedItem]:
+    """Chronological list of newly downloaded videos across subscribed channels."""
+    return await _recently_added_items(user, db, limit)
+
+
+@router.get("/home", response_model=HomeFeed)
+async def home_feed(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    limit: int = Query(20, ge=1, le=50),
+) -> HomeFeed:
+    """Unified home payload: all three feed sections in a single round-trip.
+
+    Reuses the exact per-section query helpers, so it stays in lockstep with
+    the individual endpoints (which existing clients keep using).
+    """
+    return HomeFeed(
+        continue_watching=await _continue_watching_items(user, db, limit),
+        new_episodes=await _new_episodes_items(user, db, limit),
+        recently_added=await _recently_added_items(user, db, limit),
+    )

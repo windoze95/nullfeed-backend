@@ -76,6 +76,27 @@ async def test_progress_upsert_double_put_single_row(client, make_user):
         assert refs[0].last_watched_at is not None
 
 
+async def test_progress_emits_progress_updated_event(client, make_user, monkeypatch):
+    user, headers = await make_user()
+    async with async_session_factory() as db:
+        channel = await seed_channel(db)
+        video = await seed_video(db, channel, status="COMPLETE")
+        video.duration_seconds = 600
+        await db.commit()
+
+    publish_mock = MagicMock()
+    monkeypatch.setattr("app.api.videos.publish_progress_updated", publish_mock)
+
+    resp = await client.put(
+        f"/api/videos/{video.id}/progress",
+        json={"position_seconds": 42},
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    # video_id, user_id, position_seconds, derived is_watched (mid-video -> False)
+    publish_mock.assert_called_once_with(video.id, user["id"], 42, False)
+
+
 async def test_progress_reactivates_soft_deleted_ref(client, make_user):
     user, headers = await make_user()
     async with async_session_factory() as db:

@@ -119,3 +119,82 @@ def test_cataloged_batch_preserves_feed_order(monkeypatch):
     by_title = {v.title: v.created_at for v in rows}
     assert by_title["Newest"] > by_title["Middle"] > by_title["Oldest"]
     db.close()
+
+
+def _poller_db_with_subscribers(*user_ids, initial_poll_done):
+    """Build an in-memory poller DB with a channel + subscribers.
+
+    ``initial_poll_done`` sets last_checked_at so the poller treats the next
+    poll's new rows as genuinely new (True) vs back-catalog ingestion (False).
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app.models import Base
+    from app.models.subscription import UserSubscription
+    from app.utils.time import utcnow_naive
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    channel = _make_channel(
+        last_checked_at=utcnow_naive() if initial_poll_done else None
+    )
+    db.add(channel)
+    for uid in user_ids:
+        db.add(UserSubscription(user_id=uid, channel_id=channel.id))
+    db.commit()
+    return db, channel
+
+
+def test_new_episode_event_emitted_per_subscriber(monkeypatch):
+    from app.services import channel_poller
+
+    db, channel = _poller_db_with_subscribers("u1", "u2", initial_poll_done=True)
+    feed = {"videos": [{"youtube_video_id": "vid00000001", "title": "New One"}]}
+    monkeypatch.setattr(channel_poller, "fetch_channel_videos", lambda _: feed)
+    publish_mock = MagicMock()
+    monkeypatch.setattr(channel_poller, "publish_new_episode", publish_mock)
+
+    channel_poller.poll_single_channel(channel.id, db)
+
+    # One event per (subscriber x new video): 2 subscribers, 1 new video.
+    assert publish_mock.call_count == 2
+    assert {call.args[1] for call in publish_mock.call_args_list} == {"u1", "u2"}
+    for call in publish_mock.call_args_list:
+        assert call.kwargs["channel_id"] == channel.id
+        assert call.kwargs["title"] == "New One"
+        assert call.kwargs["youtube_video_id"] == "vid00000001"
+    db.close()
+
+
+def test_new_episode_event_suppressed_on_initial_poll(monkeypatch):
+    from app.services import channel_poller
+
+    db, channel = _poller_db_with_subscribers("u1", initial_poll_done=False)
+    feed = {"videos": [{"youtube_video_id": "vid00000001", "title": "Back Catalog"}]}
+    monkeypatch.setattr(channel_poller, "fetch_channel_videos", lambda _: feed)
+    publish_mock = MagicMock()
+    monkeypatch.setattr(channel_poller, "publish_new_episode", publish_mock)
+
+    channel_poller.poll_single_channel(channel.id, db)
+
+    publish_mock.assert_not_called()
+    db.close()
+
+
+def test_new_episode_event_skipped_for_already_known_video(monkeypatch):
+    """A second poll that surfaces no new rows emits nothing."""
+    from app.services import channel_poller
+
+    db, channel = _poller_db_with_subscribers("u1", initial_poll_done=True)
+    feed = {"videos": [{"youtube_video_id": "vid00000001", "title": "New One"}]}
+    monkeypatch.setattr(channel_poller, "fetch_channel_videos", lambda _: feed)
+    publish_mock = MagicMock()
+    monkeypatch.setattr(channel_poller, "publish_new_episode", publish_mock)
+
+    channel_poller.poll_single_channel(channel.id, db)  # first sighting: 1 event
+    channel_poller.poll_single_channel(channel.id, db)  # already known: 0 events
+
+    assert publish_mock.call_count == 1
+    db.close()
