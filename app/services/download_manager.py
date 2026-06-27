@@ -74,7 +74,10 @@ class _DownloadWatchdog(threading.Thread):
         self._poll_interval = poll_interval
         self._started_at = time.monotonic()
         self._last_output_at = self._started_at
-        self._stop = threading.Event()
+        # NB: must not be named ``_stop`` — that shadows ``threading.Thread._stop``,
+        # an internal method ``Thread.join()`` calls, which would raise
+        # "'Event' object is not callable" on some CPython versions.
+        self._stop_event = threading.Event()
         self.reason: str | None = None
 
     def note_output(self) -> None:
@@ -82,10 +85,10 @@ class _DownloadWatchdog(threading.Thread):
         self._last_output_at = time.monotonic()
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
 
     def run(self) -> None:
-        while not self._stop.wait(self._poll_interval):
+        while not self._stop_event.wait(self._poll_interval):
             if self._process.poll() is not None:
                 return  # process exited on its own; the reader is draining EOF
             now = time.monotonic()
