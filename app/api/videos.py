@@ -1,3 +1,5 @@
+import asyncio
+import logging
 import os
 from datetime import timedelta
 
@@ -16,11 +18,13 @@ from app.models.user_video_ref import UserVideoRef
 from app.models.video import Video
 from app.schemas.video import DownloadRequest, VideoDetail, VideoOut, VideoProgress
 from app.services.media_server import build_media_response
+from app.services.progress_broadcaster import publish_progress_updated
 from app.services.storage import check_and_delete_orphan
 from app.tasks.download_tasks import download_preview_task, download_video_task
 from app.utils.time import utcnow_naive
 
 router = APIRouter(prefix="/api/videos", tags=["videos"])
+logger = logging.getLogger(__name__)
 
 
 async def _ensure_active_ref(db: AsyncSession, user_id: str, video_id: str) -> None:
@@ -363,6 +367,20 @@ async def update_progress(
     )
     await db.execute(stmt)
     await db.commit()
+
+    # Live-sync the user's other devices. Best-effort and off the event loop:
+    # a publish failure (e.g. Redis down) must never fail the progress save.
+    try:
+        await asyncio.to_thread(
+            publish_progress_updated,
+            video_id,
+            user.id,
+            body.position_seconds,
+            is_watched,
+        )
+    except Exception:
+        logger.debug("progress_updated publish failed for video %s", video_id)
+
     return {"detail": "Progress updated"}
 
 

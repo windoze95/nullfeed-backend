@@ -25,6 +25,7 @@ from app.services.download_manager import (
     download_video,
 )
 from app.services.download_reaper import reap_stuck_downloads
+from app.services.session_reaper import reap_expired_sessions
 from app.utils.time import utcnow_naive
 from app.services.progress_broadcaster import (
     publish_download_complete,
@@ -428,6 +429,24 @@ def reap_stuck_downloads_task(self) -> dict:
         download_video_task.delay(video_id)
 
     return {"status": "ok", **result}
+
+
+@celery_app.task(
+    name="app.tasks.download_tasks.reap_expired_sessions_task",
+    bind=True,
+    max_retries=0,
+)
+def reap_expired_sessions_task(self) -> dict:
+    """Periodic task: delete auth sessions past their absolute/idle lifetime."""
+    db = _get_sync_db()
+    try:
+        deleted = reap_expired_sessions(db)
+        return {"status": "ok", "deleted": deleted}
+    except Exception:
+        logger.exception("Error in reap_expired_sessions_task")
+        return {"status": "error"}
+    finally:
+        db.close()
 
 
 @worker_ready.connect

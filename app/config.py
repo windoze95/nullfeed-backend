@@ -15,6 +15,14 @@ class Settings(BaseSettings):
     check_interval_minutes: int = 60
     metadata_refresh_interval_hours: int = 12
 
+    # Auth sessions
+    # A session is rejected once it is older than the absolute TTL (since
+    # creation) or has been idle longer than the idle TTL (since last activity).
+    # Defaults are generous so active users are never logged out unexpectedly;
+    # tune them down for stricter security.
+    session_absolute_ttl_days: int = 30
+    session_idle_ttl_days: int = 14
+
     # File permissions
     puid: int = 1000
     pgid: int = 1000

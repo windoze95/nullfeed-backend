@@ -9,6 +9,14 @@ class FeedItem(BaseModel):
     video: VideoOut
 
 
+class HomeFeed(BaseModel):
+    """Unified home payload: the three feed sections in a single response."""
+
+    continue_watching: list[FeedItem]
+    new_episodes: list[FeedItem]
+    recently_added: list[FeedItem]
+
+
 class RecommendationOut(BaseModel):
     id: str
     channel_name: str

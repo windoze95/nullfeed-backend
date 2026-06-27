@@ -14,6 +14,7 @@ from app.services.download_manager import (
     fetch_channel_metadata,
     fetch_channel_videos,
 )
+from app.services.progress_broadcaster import publish_new_episode
 from app.utils.time import utcnow_naive
 
 logger = logging.getLogger(__name__)
@@ -69,6 +70,7 @@ def poll_single_channel(channel_id: str, db: Session) -> dict:
 
     cataloged_ids: list[str] = []
     new_video_ids: list[str] = []
+    new_videos_for_events: list[dict] = []
 
     # yt-dlp returns the channel feed newest-first. Cataloged videos have no
     # upload date until downloaded, and listings fall back to created_at — so
@@ -118,6 +120,13 @@ def poll_single_channel(channel_id: str, db: Session) -> dict:
 
         new_video_ids.append(video.id)
         cataloged_ids.append(video.id)
+        new_videos_for_events.append(
+            {
+                "id": video.id,
+                "title": video.title,
+                "youtube_video_id": video.youtube_video_id,
+            }
+        )
         logger.info("New video cataloged: %s (%s)", yt_video_id, video.title)
 
     # Determine auto-download candidates based on subscriber tracking modes
@@ -129,6 +138,11 @@ def poll_single_channel(channel_id: str, db: Session) -> dict:
 
     channel.last_checked_at = utcnow_naive()
     db.commit()
+
+    # Notify subscribers about genuinely new episodes — never the back catalog
+    # ingested on the very first poll (had_initial_poll is False then).
+    if had_initial_poll and new_videos_for_events:
+        _emit_new_episode_events(channel_id, new_videos_for_events, db)
 
     return {"cataloged_ids": cataloged_ids, "auto_download_ids": auto_download_ids}
 
@@ -272,6 +286,36 @@ def _determine_auto_downloads(
             video.status = "PENDING"
 
     return list(auto_download_set)
+
+
+def _emit_new_episode_events(channel_id: str, videos: list[dict], db: Session) -> None:
+    """Broadcast a new_episode event to every subscriber of the channel.
+
+    Best-effort: a notification failure (e.g. Redis down) must never break a
+    poll, so the whole emit is wrapped and only logged.
+    """
+    try:
+        subscriber_ids = [
+            row[0]
+            for row in db.execute(
+                select(UserSubscription.user_id).where(
+                    UserSubscription.channel_id == channel_id
+                )
+            ).all()
+        ]
+        for user_id in subscriber_ids:
+            for video in videos:
+                publish_new_episode(
+                    video["id"],
+                    user_id,
+                    channel_id=channel_id,
+                    title=video["title"],
+                    youtube_video_id=video["youtube_video_id"],
+                )
+    except Exception:
+        logger.exception(
+            "Failed to publish new_episode events for channel %s", channel_id
+        )
 
 
 def _ensure_user_refs(video: Video, channel_id: str, db: Session) -> None:
