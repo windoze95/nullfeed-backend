@@ -26,6 +26,12 @@ class Settings(BaseSettings):
     session_absolute_ttl_days: int = 30
     session_idle_ttl_days: int = 14
 
+    # Trust X-Forwarded-For when deriving the client IP for PIN rate limiting.
+    # Enable ONLY when running behind a single trusted reverse proxy that sets
+    # this header; if clients can reach the app directly they could forge it to
+    # evade the throttle. Off by default -> the real socket peer is used.
+    trust_proxy_headers: bool = False
+
     # File permissions
     puid: int = 1000
     pgid: int = 1000

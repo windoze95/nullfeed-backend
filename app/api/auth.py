@@ -2,15 +2,17 @@ import asyncio
 import hashlib
 import hmac
 import logging
+import math
 import os
 import secrets
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import httpx
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -42,11 +44,38 @@ _SCRYPT_P = 1
 # Refresh sessions.last_seen_at at most this often.
 _LAST_SEEN_REFRESH = timedelta(hours=1)
 
-# In-memory PIN rate limiting: after N consecutive failures, lock for a bit.
-_PIN_MAX_FAILURES = 5
-_PIN_LOCKOUT_SECONDS = 30.0
-_pin_failures: dict[str, int] = {}
-_pin_lockouts: dict[str, float] = {}
+# --- PIN brute-force throttle ----------------------------------------------
+#
+# PIN attempts are rate-limited per (client IP, target user) with exponential
+# backoff. Keying on the IP — not the user id alone — is deliberate: the old
+# per-user lock could be tripped by ANYONE who knew a user_id, and /profiles
+# lists every user_id, so an attacker could lock a household member out at will
+# (an account-lockout DoS). Folding the user_id into the key as well keeps a
+# shared household device able to switch to another profile while one is backed
+# off, and still throttles guessing of any single PIN. Because attacker and
+# victim have different IPs, an attacker can no longer lock out the victim.
+#
+# The store is in-process: counters are lost on restart and NOT shared across
+# workers. Kept this way on purpose so tests / local dev need no running Redis.
+# TODO: back this with the existing Redis (settings.redis_url) for multi-worker
+# coordination and restart persistence once a Redis is guaranteed in all envs.
+_PIN_MAX_FAILURES = 5  # failures allowed before the first lockout kicks in
+_PIN_LOCKOUT_BASE_SECONDS = 30.0  # first lockout window; doubles each failure
+_PIN_LOCKOUT_MAX_SECONDS = 3600.0  # cap on the exponential backoff (1 hour)
+_PIN_FAILURE_RESET_SECONDS = 3600.0  # forget an idle key's history after this
+_PIN_THROTTLE_SOFT_CAP = 1024  # prune stale keys once the map grows past this
+
+
+@dataclass
+class _PinThrottle:
+    """Per-key brute-force state. Times are ``time.monotonic`` seconds."""
+
+    failures: int = 0
+    locked_until: float = 0.0  # 0.0 means not currently locked
+    last_failure: float = 0.0
+
+
+_pin_throttle: dict[str, _PinThrottle] = {}
 
 
 def _hash_pin(pin: str) -> str:
@@ -56,6 +85,13 @@ def _hash_pin(pin: str) -> str:
         pin.encode(), salt=salt, n=_SCRYPT_N, r=_SCRYPT_R, p=_SCRYPT_P
     )
     return f"scrypt${salt.hex()}${digest.hex()}"
+
+
+# A valid scrypt hash of a random, unguessable secret. When /select is given a
+# user_id that does not exist we verify the supplied PIN against this instead of
+# returning early, so a missing user costs the same scrypt work — and yields the
+# same response — as a wrong PIN. It can never match a real attempt.
+_DUMMY_PIN_HASH = _hash_pin(secrets.token_urlsafe(32))
 
 
 def _is_legacy_pin_hash(stored: str) -> bool:
@@ -87,30 +123,96 @@ def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-def _check_pin_rate_limit(user_id: str) -> None:
-    """Raise 429 while the user is locked out from PIN attempts."""
-    locked_until = _pin_lockouts.get(user_id)
-    if locked_until is None:
+def _client_ip(request: Request) -> str:
+    """Best-effort client IP used to key PIN rate limiting.
+
+    Defaults to the real TCP peer (``request.client.host``), which the client
+    cannot forge. Only when ``settings.trust_proxy_headers`` is set — i.e. the
+    operator has put NullFeed behind a single trusted reverse proxy that appends
+    ``X-Forwarded-For`` — do we use the rightmost XFF entry, which is the address
+    that trusted proxy actually observed. The leftmost entries are never trusted
+    because a client can forge them. Do NOT enable ``trust_proxy_headers`` if
+    clients can reach the app directly: they could then spoof their rate-limit
+    key and evade the throttle.
+    """
+    if settings.trust_proxy_headers:
+        forwarded = request.headers.get("x-forwarded-for", "")
+        hops = [hop.strip() for hop in forwarded.split(",") if hop.strip()]
+        if hops:
+            return hops[-1]
+    if request.client is not None:
+        return request.client.host
+    return "unknown"
+
+
+def _pin_rate_key(request: Request, user_id: str) -> str:
+    """Throttle key: client IP + target user_id (neither contains '|')."""
+    return f"{_client_ip(request)}|{user_id}"
+
+
+def _prune_pin_throttle(now: float) -> None:
+    """Drop long-idle entries so the map can't grow without bound (IP churn)."""
+    if len(_pin_throttle) <= _PIN_THROTTLE_SOFT_CAP:
         return
-    if time.monotonic() < locked_until:
+    stale = [
+        key
+        for key, state in _pin_throttle.items()
+        if now >= state.locked_until
+        and now - state.last_failure >= _PIN_FAILURE_RESET_SECONDS
+    ]
+    for key in stale:
+        _pin_throttle.pop(key, None)
+
+
+def _check_pin_rate_limit(key: str) -> None:
+    """Raise 429 (with Retry-After) while this key is in a backoff window."""
+    state = _pin_throttle.get(key)
+    if state is None:
+        return
+    now = time.monotonic()
+    if state.locked_until and now < state.locked_until:
+        retry_after = max(1, math.ceil(state.locked_until - now))
         raise HTTPException(
             status_code=429,
-            detail="Too many failed PIN attempts. Try again in 30 seconds.",
+            detail="Too many failed PIN attempts. Try again later.",
+            headers={"Retry-After": str(retry_after)},
         )
-    _pin_lockouts.pop(user_id, None)
-    _pin_failures.pop(user_id, None)
+    # The lockout (if any) has elapsed. Once a key has been idle long enough,
+    # forget it so honest users get a clean slate; otherwise keep the running
+    # failure count so continued abuse keeps escalating the backoff.
+    if now - state.last_failure >= _PIN_FAILURE_RESET_SECONDS:
+        _pin_throttle.pop(key, None)
 
 
-def _record_pin_failure(user_id: str) -> None:
-    count = _pin_failures.get(user_id, 0) + 1
-    _pin_failures[user_id] = count
-    if count >= _PIN_MAX_FAILURES:
-        _pin_lockouts[user_id] = time.monotonic() + _PIN_LOCKOUT_SECONDS
+def _record_pin_failure(key: str) -> None:
+    """Count a failed PIN attempt and (re)arm an exponential backoff lockout."""
+    now = time.monotonic()
+    state = _pin_throttle.setdefault(key, _PinThrottle())
+    state.failures += 1
+    state.last_failure = now
+    if state.failures >= _PIN_MAX_FAILURES:
+        backoff = min(
+            _PIN_LOCKOUT_BASE_SECONDS * 2 ** (state.failures - _PIN_MAX_FAILURES),
+            _PIN_LOCKOUT_MAX_SECONDS,
+        )
+        state.locked_until = now + backoff
+    _prune_pin_throttle(now)
 
 
-def _clear_pin_failures(user_id: str) -> None:
-    _pin_failures.pop(user_id, None)
-    _pin_lockouts.pop(user_id, None)
+def _reset_pin_throttle(key: str) -> None:
+    """Clear a single key's history (called after a correct PIN)."""
+    _pin_throttle.pop(key, None)
+
+
+def _reset_pin_throttle_for_user(user_id: str) -> None:
+    """Clear every IP's throttle for a user (PIN changed/removed or deleted).
+
+    Without this, an admin resetting a forgotten PIN would leave the locked-out
+    device backing off until the window elapses.
+    """
+    suffix = f"|{user_id}"
+    for key in [k for k in _pin_throttle if k.endswith(suffix)]:
+        _pin_throttle.pop(key, None)
 
 
 def _session_is_expired(session: Session, now: datetime) -> bool:
@@ -203,25 +305,40 @@ async def list_profiles(db: AsyncSession = Depends(get_db)) -> list[UserProfile]
 @router.post("/select", response_model=UserSession)
 async def select_profile(
     body: UserSelect,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> UserSession:
+    rate_key = _pin_rate_key(request, body.user_id)
+    _check_pin_rate_limit(rate_key)
+
     result = await db.execute(select(User).where(User.id == body.user_id))
     user = result.scalar_one_or_none()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
 
-    if user.pin_hash:
-        _check_pin_rate_limit(user.id)
+    # A missing user is treated exactly like a PIN-protected user whose PIN can
+    # never match: same status, message, and scrypt cost, so /select can't be
+    # used as a user-existence/timing oracle. (PIN-less users that DO exist stay
+    # distinguishable, but that is inherent — they carry no secret — and is
+    # already public via /profiles.)
+    stored_hash = user.pin_hash if user is not None else _DUMMY_PIN_HASH
+
+    if stored_hash:
         if not body.pin:
             raise HTTPException(status_code=403, detail="PIN required")
-        if not _verify_pin(body.pin, user.pin_hash):
-            _record_pin_failure(user.id)
+        if not _verify_pin(body.pin, stored_hash):
+            _record_pin_failure(rate_key)
             raise HTTPException(status_code=403, detail="Incorrect PIN")
-        _clear_pin_failures(user.id)
+        _reset_pin_throttle(rate_key)
+        if user is None:
+            # _DUMMY_PIN_HASH must never verify; refuse defensively if it did.
+            raise HTTPException(status_code=403, detail="Incorrect PIN")
         # Upgrade legacy SHA-256 hashes to scrypt on successful verification.
-        if _is_legacy_pin_hash(user.pin_hash):
+        # (stored_hash is user.pin_hash here, narrowed to str by `if stored_hash`.)
+        if _is_legacy_pin_hash(stored_hash):
             user.pin_hash = _hash_pin(body.pin)
 
+    # Reached only for a PIN-less existing user or a verified PIN, so the user
+    # row is always present here.
+    assert user is not None
     token = secrets.token_urlsafe(32)
     db.add(Session(token_hash=_hash_token(token), user_id=user.id))
     await db.commit()
@@ -330,10 +447,10 @@ async def update_profile(
         target.avatar_url = body.avatar_url
     if body.remove_pin:
         target.pin_hash = None
-        _clear_pin_failures(target.id)
+        _reset_pin_throttle_for_user(target.id)
     elif body.pin is not None:
         target.pin_hash = _hash_pin(body.pin)
-        _clear_pin_failures(target.id)
+        _reset_pin_throttle_for_user(target.id)
 
     await db.commit()
     await db.refresh(target)
@@ -391,5 +508,5 @@ async def delete_profile(
         except Exception:
             logger.exception("Orphan cleanup failed for video %s", video_id)
 
-    _clear_pin_failures(user_id)
+    _reset_pin_throttle_for_user(user_id)
     return {"detail": "Profile deleted"}

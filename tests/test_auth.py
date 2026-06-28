@@ -9,6 +9,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
+import app.api.auth as auth_api
 import app.services.youtube_import as youtube_import
 from app.api.auth import _hash_token
 from app.config import settings
@@ -127,22 +128,91 @@ async def test_legacy_sha256_pin_verifies_and_upgrades(client):
 
 
 async def test_pin_rate_limit_429_after_five_failures(client):
+    """A burst of wrong PINs from one IP eventually backs off with a 429."""
     resp = await client.post(
         "/api/auth/create", json={"display_name": "Locked", "pin": "1234"}
     )
     user_id = resp.json()["id"]
 
+    # Every request shares the test client's IP, so they land on one throttle
+    # key and accumulate toward the lockout threshold.
     for _ in range(5):
         resp = await client.post(
             "/api/auth/select", json={"user_id": user_id, "pin": "0000"}
         )
         assert resp.status_code == 403
 
-    # Even the correct PIN is rejected during the lockout window.
+    # Even the correct PIN is rejected during the lockout window, with a
+    # Retry-After hint for when to try again.
     resp = await client.post(
         "/api/auth/select", json={"user_id": user_id, "pin": "1234"}
     )
     assert resp.status_code == 429
+    assert int(resp.headers["Retry-After"]) > 0
+
+
+async def test_pin_lockout_is_scoped_to_client_ip(client):
+    """One IP's failures must not lock another IP out of the same profile."""
+    resp = await client.post(
+        "/api/auth/create", json={"display_name": "Shared", "pin": "1234"}
+    )
+    user_id = resp.json()["id"]
+
+    # The default client (127.0.0.1) trips its own lockout.
+    for _ in range(5):
+        r = await client.post(
+            "/api/auth/select", json={"user_id": user_id, "pin": "0000"}
+        )
+        assert r.status_code == 403
+    r = await client.post("/api/auth/select", json={"user_id": user_id, "pin": "1234"})
+    assert r.status_code == 429
+
+    # A request from a different source IP can still authenticate. (The old
+    # per-user lock would have rejected this — the account-lockout DoS.)
+    transport = ASGITransport(app=app, client=("203.0.113.9", 5555))
+    async with AsyncClient(transport=transport, base_url="http://test") as other_ip:
+        r = await other_ip.post(
+            "/api/auth/select", json={"user_id": user_id, "pin": "1234"}
+        )
+        assert r.status_code == 200
+        assert r.json()["token"]
+
+
+async def test_select_is_not_a_user_existence_oracle(client):
+    """A wrong PIN and an unknown user must be indistinguishable on /select."""
+    resp = await client.post(
+        "/api/auth/create", json={"display_name": "Real", "pin": "1234"}
+    )
+    real_id = resp.json()["id"]
+    ghost_id = str(uuid.uuid4())  # never created
+
+    # With a PIN supplied: wrong-PIN vs. unknown-user return identical bodies
+    # (same status + detail + code), so there is no 404 "User not found" leak.
+    wrong = await client.post(
+        "/api/auth/select", json={"user_id": real_id, "pin": "0000"}
+    )
+    ghost = await client.post(
+        "/api/auth/select", json={"user_id": ghost_id, "pin": "0000"}
+    )
+    assert wrong.status_code == ghost.status_code == 403
+    assert wrong.json() == ghost.json()
+
+    # With no PIN supplied: both look like a PIN-protected profile awaiting one.
+    wrong_np = await client.post("/api/auth/select", json={"user_id": real_id})
+    ghost_np = await client.post("/api/auth/select", json={"user_id": ghost_id})
+    assert wrong_np.status_code == ghost_np.status_code == 403
+    assert wrong_np.json() == ghost_np.json()
+
+    # Probing an unknown user is throttled exactly like a real one, so the
+    # endpoint can't be hammered to cheaply confirm non-existence.
+    probe_id = str(uuid.uuid4())
+    statuses = []
+    for _ in range(auth_api._PIN_MAX_FAILURES + 1):
+        r = await client.post(
+            "/api/auth/select", json={"user_id": probe_id, "pin": "0000"}
+        )
+        statuses.append(r.status_code)
+    assert 429 in statuses
 
 
 async def test_me_and_logout(client, make_user):

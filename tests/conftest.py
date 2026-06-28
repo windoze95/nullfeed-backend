@@ -33,8 +33,7 @@ from app.models import Base
 def _reset_in_memory_state():
     """Clear per-process caches/counters that would leak between tests."""
     yield
-    auth_api._pin_failures.clear()
-    auth_api._pin_lockouts.clear()
+    auth_api._pin_throttle.clear()
     youtube_import._resolve_cache.clear()
     youtube_import._suggestions_cache.clear()
     websocket_api._connections.clear()
