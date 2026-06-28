@@ -1,0 +1,47 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>NullFeed</Name>
+  <Repository>ghcr.io/windoze95/nullfeed-backend:latest</Repository>
+  <Registry>https://github.com/windoze95/nullfeed-backend/pkgs/container/nullfeed-backend</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/windoze95/nullfeed-backend/issues</Support>
+  <Project>https://github.com/windoze95/nullfeed-backend</Project>
+  <Overview>NullFeed is a self-hosted YouTube media center: subscribe to channels, automatically download new uploads with yt-dlp, and stream them ad-free to the iOS app and the native Apple TV app. This single all-in-one image runs the API, the background downloader/poller (Celery + Redis), and the database internally &#8212; no extra containers required. New uploads are discovered via adaptive RSS polling (and optional WebSub for near-real-time), and new-episode push notifications are relayed through a shared push gateway, so no Apple push key of your own is needed. Set ANTHROPIC_API_KEY to enable the AI &quot;Discover&quot; recommendations.</Overview>
+  <Category>MediaApp:Video MediaServer:Video Tools:</Category>
+  <WebUI>http://[IP]:[PORT:8484]/</WebUI>
+  <TemplateURL/>
+  <Icon>https://raw.githubusercontent.com/windoze95/nullfeed-backend/main/unraid/nullfeed.png</Icon>
+  <ExtraParams/>
+  <PostArgs/>
+  <CPUset/>
+  <DateInstalled/>
+  <DonateText/>
+  <DonateLink/>
+  <Requires/>
+  <Description>Self-hosted YouTube media center &#8212; downloads subscribed channels and streams them ad-free to the NullFeed iOS &amp; Apple TV apps. All-in-one image (API + downloader + Redis + DB).</Description>
+  <Config Name="WebUI / API Port" Target="8484" Default="8484" Mode="tcp" Description="HTTP port for the API and the apps to connect to." Type="Port" Display="always" Required="true" Mask="false">8484</Config>
+  <Config Name="Media library" Target="/data/media" Default="/mnt/user/nullfeed/media" Mode="rw" Description="Downloaded video files (content). Put this on an array/media share, NOT appdata." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/nullfeed/media</Config>
+  <Config Name="Thumbnails" Target="/data/thumbnails" Default="/mnt/user/nullfeed/thumbnails" Mode="rw" Description="Downloaded video/channel thumbnail images (content). Keep with the media library, not appdata." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/nullfeed/thumbnails</Config>
+  <Config Name="Database" Target="/data/db" Default="/mnt/user/nullfeed/db" Mode="rw" Description="SQLite library index (channels, videos, profiles, sessions). Application data, not content — kept on the data share alongside the library. Move to appdata if you prefer it on cache." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/nullfeed/db</Config>
+  <Config Name="Config" Target="/data/config" Default="/mnt/user/appdata/nullfeed" Mode="rw" Description="Config + persisted secrets only (stream-ticket secret, push gateway key, WebSub secret). This is the only volume that belongs in appdata." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/nullfeed</Config>
+  <Config Name="Anthropic API Key" Target="ANTHROPIC_API_KEY" Default="" Mode="" Description="Optional. Enables the AI 'Discover' recommendations tab. Leave blank to disable that feature." Type="Variable" Display="always" Required="false" Mask="true"/>
+  <Config Name="Media Quality" Target="MEDIA_QUALITY" Default="1080p" Mode="" Description="Default download quality: 720p | 1080p | 4k | best." Type="Variable" Display="always" Required="true" Mask="false">1080p</Config>
+  <Config Name="Download Concurrency" Target="DOWNLOAD_CONCURRENCY" Default="2" Mode="" Description="Maximum simultaneous yt-dlp downloads." Type="Variable" Display="always" Required="true" Mask="false">2</Config>
+  <Config Name="PUID" Target="PUID" Default="99" Mode="" Description="User ID that owns the downloaded files (Unraid default is 99 = nobody)." Type="Variable" Display="always" Required="true" Mask="false">99</Config>
+  <Config Name="PGID" Target="PGID" Default="100" Mode="" Description="Group ID that owns the downloaded files (Unraid default is 100 = users)." Type="Variable" Display="always" Required="true" Mask="false">100</Config>
+  <Config Name="Scheduler tick (minutes)" Target="CHECK_INTERVAL_MINUTES" Default="5" Mode="" Description="How often the poller wakes to check which channels are due. Keep &#8804; the poll floor below." Type="Variable" Display="advanced" Required="false" Mask="false">5</Config>
+  <Config Name="Poll interval floor (minutes)" Target="POLL_INTERVAL_FLOOR_MINUTES" Default="15" Mode="" Description="Fastest per-channel polling interval (used for active channels)." Type="Variable" Display="advanced" Required="false" Mask="false">15</Config>
+  <Config Name="Poll interval cap (minutes)" Target="POLL_INTERVAL_CAP_MINUTES" Default="240" Mode="" Description="Slowest per-channel polling interval (used for quiet channels)." Type="Variable" Display="advanced" Required="false" Mask="false">240</Config>
+  <Config Name="Poll backoff factor" Target="POLL_INTERVAL_BACKOFF_FACTOR" Default="2.0" Mode="" Description="How quickly a quiet channel's interval grows toward the cap." Type="Variable" Display="advanced" Required="false" Mask="false">2.0</Config>
+  <Config Name="Trust proxy headers" Target="TRUST_PROXY_HEADERS" Default="false" Mode="" Description="Set true ONLY when behind a single trusted reverse proxy that sets X-Forwarded-For (used for PIN rate-limiting). Leave false for direct access." Type="Variable" Display="advanced" Required="false" Mask="false">false</Config>
+  <Config Name="Stream ticket secret" Target="STREAM_TICKET_SECRET" Default="" Mode="" Description="Optional HMAC secret for short-lived stream/WebSocket tickets. Leave blank to auto-generate and persist under /data/config (fine for single-host). Set explicitly only for multi-host or to rotate tickets." Type="Variable" Display="advanced" Required="false" Mask="true"/>
+  <Config Name="Push gateway URL" Target="NULLFEED_PUSH_GATEWAY_URL" Default="https://push.julian.codes" Mode="" Description="Relays new-episode push notifications (auto-enrolls; no Apple key needed). Leave default to use the public gateway, set BLANK to disable push, or point at your own gateway." Type="Variable" Display="advanced" Required="false" Mask="false">https://push.julian.codes</Config>
+  <Config Name="Push API key (optional)" Target="NULLFEED_PUSH_API_KEY" Default="" Mode="" Description="Pin an explicit gateway tenant key instead of auto-enrolling. Leave blank to auto-enroll." Type="Variable" Display="advanced" Required="false" Mask="true"/>
+  <Config Name="Push enroll token (optional)" Target="NULLFEED_PUSH_ENROLL_TOKEN" Default="" Mode="" Description="Only needed if the gateway uses 'gated' enrollment. Leave blank for the public gateway." Type="Variable" Display="advanced" Required="false" Mask="true"/>
+  <Config Name="WebSub callback URL (optional)" Target="NULLFEED_WEBSUB_CALLBACK_URL" Default="" Mode="" Description="Optional near-real-time new-upload push from YouTube. Set to a PUBLIC https URL that routes to /api/websub/callback (e.g. https://nullfeed.example.com/api/websub/callback). Leave blank to rely on RSS polling." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="WebSub hub URL" Target="NULLFEED_WEBSUB_HUB_URL" Default="https://pubsubhubbub.appspot.com/subscribe" Mode="" Description="PubSubHubbub hub (Google's public hub by default). Only used when a WebSub callback URL is set." Type="Variable" Display="advanced" Required="false" Mask="false">https://pubsubhubbub.appspot.com/subscribe</Config>
+  <Config Name="WebSub lease (seconds)" Target="NULLFEED_WEBSUB_LEASE_SECONDS" Default="432000" Mode="" Description="Subscription lease to request/renew (default 5 days). Only used when WebSub is enabled." Type="Variable" Display="advanced" Required="false" Mask="false">432000</Config>
+</Container>
