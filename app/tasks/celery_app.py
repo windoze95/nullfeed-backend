@@ -51,4 +51,12 @@ celery_app.conf.beat_schedule = {
         "task": "app.tasks.download_tasks.reap_expired_sessions_task",
         "schedule": 3600,  # hourly
     },
+    # Apply each subscription's retention_policy (e.g. KEEP_LAST_N): soft-remove
+    # the user's refs to downloaded videos beyond the policy so the orphan
+    # cleanup can reclaim files nobody else still wants. Cheap (indexed queries
+    # over the few subscriptions that set a policy); a few hours' latency is fine.
+    "enforce-retention": {
+        "task": "app.tasks.download_tasks.enforce_retention_task",
+        "schedule": settings.retention_interval_hours * 3600,
+    },
 }

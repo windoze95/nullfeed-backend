@@ -3,6 +3,7 @@ import os
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session as DBSession
 
 from app.config import settings
 from app.models.user_video_ref import UserVideoRef
@@ -11,30 +12,13 @@ from app.models.video import Video
 logger = logging.getLogger(__name__)
 
 
-async def check_and_delete_orphan(video_id: str, db: AsyncSession) -> bool:
+def _reclaim_orphan_artifacts(video: Video) -> None:
+    """Delete a video's on-disk artifacts and reset its row to CATALOGED.
+
+    Pure filesystem + attribute mutation: the caller owns the session and the
+    commit. Shared by the async (API) and sync (Celery) orphan-cleanup entry
+    points so the reclamation logic lives in exactly one place.
     """
-    Check if a video has any remaining active references.
-    If not, delete the physical file from disk and clean up thumbnails.
-    Returns True if the file was deleted.
-    """
-    # Count active (non-removed) references
-    result = await db.execute(
-        select(UserVideoRef).where(
-            UserVideoRef.video_id == video_id,
-            UserVideoRef.removed_at.is_(None),
-        )
-    )
-    active_refs = result.scalars().all()
-
-    if active_refs:
-        return False
-
-    # No active references remain; delete from disk.
-    video_result = await db.execute(select(Video).where(Video.id == video_id))
-    video = video_result.scalar_one_or_none()
-    if not video:
-        return False
-
     # Delete preview file
     if video.preview_file_path:
         preview_path = video.preview_file_path
@@ -85,7 +69,68 @@ async def check_and_delete_orphan(video_id: str, db: AsyncSession) -> bool:
     video.file_size_bytes = None
     video.preview_file_path = None
     video.preview_status = None
+
+
+async def check_and_delete_orphan(video_id: str, db: AsyncSession) -> bool:
+    """
+    Check if a video has any remaining active references.
+    If not, delete the physical file from disk and clean up thumbnails.
+    Returns True if the file was deleted.
+    """
+    # Count active (non-removed) references
+    result = await db.execute(
+        select(UserVideoRef).where(
+            UserVideoRef.video_id == video_id,
+            UserVideoRef.removed_at.is_(None),
+        )
+    )
+    if result.scalars().first() is not None:
+        return False
+
+    # No active references remain; delete from disk.
+    video_result = await db.execute(select(Video).where(Video.id == video_id))
+    video = video_result.scalar_one_or_none()
+    if not video:
+        return False
+
+    _reclaim_orphan_artifacts(video)
     await db.commit()
+
+    logger.info(
+        "Orphan cleanup complete for video %s (%s)",
+        video_id,
+        video.youtube_video_id,
+    )
+    return True
+
+
+def check_and_delete_orphan_sync(video_id: str, db: DBSession) -> bool:
+    """Synchronous twin of :func:`check_and_delete_orphan` for Celery tasks.
+
+    Celery runs on a synchronous SQLAlchemy ``Session``, so the async version
+    cannot be awaited there. Same contract: when no active reference remains,
+    delete the on-disk artifacts and reset the row; returns True when a file was
+    reclaimed.
+    """
+    active = (
+        db.execute(
+            select(UserVideoRef).where(
+                UserVideoRef.video_id == video_id,
+                UserVideoRef.removed_at.is_(None),
+            )
+        )
+        .scalars()
+        .first()
+    )
+    if active is not None:
+        return False
+
+    video = db.get(Video, video_id)
+    if not video:
+        return False
+
+    _reclaim_orphan_artifacts(video)
+    db.commit()
 
     logger.info(
         "Orphan cleanup complete for video %s (%s)",

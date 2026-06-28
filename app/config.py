@@ -31,6 +31,14 @@ class Settings(BaseSettings):
     poll_interval_cap_minutes: int = 240
     poll_interval_backoff_factor: float = 2.0
 
+    # Retention enforcement
+    # How often the retention sweep runs (Celery beat, in hours). Each run
+    # applies every subscription's retention_policy: e.g. KEEP_LAST_N keeps the
+    # newest N downloaded videos and soft-removes the user's refs to the rest,
+    # letting the orphan cleanup reclaim files no other user still wants.
+    # Reclaiming disk is not urgent, so a few hours' latency is plenty.
+    retention_interval_hours: int = 6
+
     # Auth sessions
     # A session is rejected once it is older than the absolute TTL (since
     # creation) or has been idle longer than the idle TTL (since last activity).
