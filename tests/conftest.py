@@ -16,6 +16,9 @@ os.environ["MEDIA_PATH"] = os.path.join(_TMP_ROOT, "media")
 os.environ["DB_PATH"] = os.path.join(_TMP_ROOT, "db")
 os.environ["CONFIG_PATH"] = os.path.join(_TMP_ROOT, "config")
 os.environ["THUMBNAILS_PATH"] = os.path.join(_TMP_ROOT, "thumbnails")
+# Disable push by default so the suite never reaches the real gateway; the push
+# tests opt in by monkeypatching settings.push_gateway_url.
+os.environ["NULLFEED_PUSH_GATEWAY_URL"] = ""
 
 import pytest
 import pytest_asyncio
@@ -23,6 +26,7 @@ from httpx import ASGITransport, AsyncClient
 
 import app.api.auth as auth_api
 import app.api.websocket as websocket_api
+import app.services.push_gateway as push_gateway
 import app.services.youtube_import as youtube_import
 from app.database import engine
 from app.main import app
@@ -37,6 +41,7 @@ def _reset_in_memory_state():
     youtube_import._resolve_cache.clear()
     youtube_import._suggestions_cache.clear()
     websocket_api._connections.clear()
+    push_gateway._reset_cache()
 
 
 @pytest_asyncio.fixture

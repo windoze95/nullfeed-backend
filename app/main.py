@@ -18,6 +18,7 @@ from app.api import (
     discover,
     feed,
     health,
+    push,
     queue,
     videos,
     websocket,
@@ -121,6 +122,7 @@ app.include_router(feed.router)
 app.include_router(discover.router)
 app.include_router(websocket.router)
 app.include_router(youtube.router)
+app.include_router(push.router)
 
 
 # ---------------------------------------------------------------------------

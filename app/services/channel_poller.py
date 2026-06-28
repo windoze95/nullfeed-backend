@@ -17,6 +17,7 @@ from app.services.download_manager import (
     fetch_videos_metadata,
 )
 from app.services.progress_broadcaster import publish_new_episode
+from app.services.push_gateway import send_to_users
 from app.utils.time import utcnow_naive
 
 logger = logging.getLogger(__name__)
@@ -455,12 +456,18 @@ def _determine_auto_downloads(
 
 
 def _emit_new_episode_events(channel_id: str, videos: list[dict], db: Session) -> None:
-    """Broadcast a new_episode event to every subscriber of the channel.
+    """Notify every subscriber of a channel's genuinely new episodes.
 
-    Best-effort: a notification failure (e.g. Redis down) must never break a
-    poll, so the whole emit is wrapped and only logged.
+    For each (subscriber, new video) we publish the live WebSocket event (for an
+    open app) and, best-effort, send a push notification (for a closed one) so
+    the client can deep-link to the video. Everything is best-effort: a failure
+    (Redis down, push gateway unreachable/disabled) must never break a poll, so
+    the whole emit is wrapped and only logged, and ``send_to_users`` itself never
+    raises and no-ops when push is disabled.
     """
     try:
+        channel = db.get(Channel, channel_id)
+        channel_name = channel.name if channel is not None else None
         subscriber_ids = [
             row[0]
             for row in db.execute(
@@ -477,6 +484,15 @@ def _emit_new_episode_events(channel_id: str, videos: list[dict], db: Session) -
                     channel_id=channel_id,
                     title=video["title"],
                     youtube_video_id=video["youtube_video_id"],
+                )
+                # Push for a backgrounded/closed app. Target the user id (the
+                # gateway rejects raw tokens for tenant keys); data carries the
+                # video id so the client can deep-link to it.
+                send_to_users(
+                    [user_id],
+                    channel_name or "New episode",
+                    video["title"],
+                    {"type": "new_episode", "video_id": video["id"]},
                 )
     except Exception:
         logger.exception(

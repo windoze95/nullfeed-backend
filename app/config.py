@@ -1,3 +1,4 @@
+from pydantic import Field
 from pydantic_settings import BaseSettings
 
 
@@ -63,6 +64,25 @@ class Settings(BaseSettings):
     # this header; if clients can reach the app directly they could forge it to
     # evade the throttle. Off by default -> the real socket peer is used.
     trust_proxy_headers: bool = False
+
+    # Push notifications (public push gateway, push.julian.codes)
+    # NullFeed relays APNs pushes through a shared, multi-tenant gateway so a
+    # self-hoster needs no Apple push key of their own. On first use the backend
+    # auto-enrolls as a tenant and persists the issued key under config_path
+    # (0600 file, shared across workers on the same volume); set push_api_key to
+    # pin an explicit operator key instead (it is never persisted). Leave
+    # push_gateway_url blank to DISABLE push entirely — every push path
+    # (register/unregister endpoints, new-episode send) then becomes a no-op.
+    # push_enroll_token is only needed when the gateway runs in "gated"
+    # enrollment mode (sent as the X-Enroll-Token header on auto-enroll).
+    push_gateway_url: str = Field(
+        default="https://push.julian.codes",
+        validation_alias="NULLFEED_PUSH_GATEWAY_URL",
+    )
+    push_api_key: str = Field(default="", validation_alias="NULLFEED_PUSH_API_KEY")
+    push_enroll_token: str = Field(
+        default="", validation_alias="NULLFEED_PUSH_ENROLL_TOKEN"
+    )
 
     # File permissions
     puid: int = 1000
