@@ -17,6 +17,7 @@ from app.models.channel import Channel
 from app.models.user import User
 from app.models.user_video_ref import UserVideoRef
 from app.models.video import Video
+from app.schemas.ticket import AccessTicket
 from app.schemas.video import (
     DownloadRequest,
     VideoDetail,
@@ -30,6 +31,7 @@ from app.services.storage import check_and_delete_orphan
 from app.tasks.download_tasks import download_preview_task, download_video_task
 from app.utils.pagination import decode_cursor, encode_cursor
 from app.utils.search import escape_like
+from app.utils.tickets import SCOPE_STREAM, TicketError, mint_ticket, verify_ticket
 from app.utils.time import utcnow_naive
 
 router = APIRouter(prefix="/api/videos", tags=["videos"])
@@ -375,17 +377,60 @@ async def request_preview(
     return {"preview_status": "DOWNLOADING"}
 
 
+@router.post("/{video_id}/playback-ticket", response_model=AccessTicket)
+async def create_playback_ticket(
+    video_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> AccessTicket:
+    """Mint a short-lived, video+user-scoped ticket for ``/stream`` (#30).
+
+    Session-authenticated; the returned ticket is passed to the stream endpoints
+    as ``?ticket=`` instead of leaking the session token into the media URL.
+    """
+    exists = await db.scalar(select(Video.id).where(Video.id == video_id))
+    if not exists:
+        raise HTTPException(status_code=404, detail="Video not found")
+    ticket, expires_in = mint_ticket(SCOPE_STREAM, user.id, video_id=video_id)
+    return AccessTicket(ticket=ticket, expires_in=expires_in)
+
+
+async def _authorize_stream(
+    video_id: str,
+    ticket: str | None,
+    token: str | None,
+    x_user_token: str | None,
+    db: AsyncSession,
+) -> None:
+    """Authorize a media stream request, raising 401 if it cannot be.
+
+    A short-lived playback ticket (``?ticket=``) is checked first, then we fall
+    back to the legacy session token carried as ``?token=`` or the X-User-Token
+    header. The fallback is kept during the transition so existing clients keep
+    working; new clients mint a per-video ticket and never put the session token
+    in the URL (#30).
+    """
+    if ticket:
+        try:
+            verify_ticket(ticket, scope=SCOPE_STREAM, video_id=video_id)
+            return
+        except TicketError:
+            pass  # fall back to the session token below
+    auth_token = token or x_user_token
+    if not auth_token or not await validate_token(auth_token):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
 @router.get("/{video_id}/preview-stream")
 async def stream_preview(
     video_id: str,
+    ticket: str | None = None,
     token: str | None = None,
     x_user_token: str | None = Header(None),
     db: AsyncSession = Depends(get_db),
     range_header: str | None = Header(None, alias="Range"),
 ) -> Response:
-    auth_token = token or x_user_token
-    if not auth_token or not await validate_token(auth_token):
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    await _authorize_stream(video_id, ticket, token, x_user_token, db)
 
     result = await db.execute(select(Video).where(Video.id == video_id))
     video = result.scalar_one_or_none()
@@ -407,15 +452,15 @@ async def stream_preview(
 @router.get("/{video_id}/stream")
 async def stream_video(
     video_id: str,
+    ticket: str | None = None,
     token: str | None = None,
     x_user_token: str | None = Header(None),
     db: AsyncSession = Depends(get_db),
     range_header: str | None = Header(None, alias="Range"),
 ) -> Response:
-    # Accept auth via query param (for <video> element) or header
-    auth_token = token or x_user_token
-    if not auth_token or not await validate_token(auth_token):
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    # Accept auth via a short-lived playback ticket or the session token (query
+    # param for the <video> element, or X-User-Token header).
+    await _authorize_stream(video_id, ticket, token, x_user_token, db)
 
     result = await db.execute(select(Video).where(Video.id == video_id))
     video = result.scalar_one_or_none()

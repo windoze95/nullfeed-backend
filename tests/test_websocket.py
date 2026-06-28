@@ -10,8 +10,10 @@ from app.main import app
 
 @pytest.mark.asyncio
 async def test_ws_absent_token_closes_4401():
+    # ticket/token are passed explicitly: a direct call bypasses FastAPI's Query
+    # resolution, so an omitted param would arrive as the Query() default object.
     ws = AsyncMock()
-    await websocket_api.websocket_endpoint(ws, user_id="u1", token=None)
+    await websocket_api.websocket_endpoint(ws, user_id="u1", ticket=None, token=None)
     ws.accept.assert_awaited_once()
     ws.close.assert_awaited_once_with(code=4401)
 
@@ -23,7 +25,9 @@ async def test_ws_unresolvable_token_closes_4401(monkeypatch):
 
     monkeypatch.setattr(websocket_api, "validate_token", fake_validate)
     ws = AsyncMock()
-    await websocket_api.websocket_endpoint(ws, user_id="u1", token="garbage")
+    await websocket_api.websocket_endpoint(
+        ws, user_id="u1", ticket=None, token="garbage"
+    )
     ws.close.assert_awaited_once_with(code=4401)
 
 
@@ -34,7 +38,9 @@ async def test_ws_token_for_other_user_closes_4401(monkeypatch):
 
     monkeypatch.setattr(websocket_api, "validate_token", fake_validate)
     ws = AsyncMock()
-    await websocket_api.websocket_endpoint(ws, user_id="u1", token="valid-but-other")
+    await websocket_api.websocket_endpoint(
+        ws, user_id="u1", ticket=None, token="valid-but-other"
+    )
     ws.close.assert_awaited_once_with(code=4401)
 
 

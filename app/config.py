@@ -47,6 +47,17 @@ class Settings(BaseSettings):
     session_absolute_ttl_days: int = 30
     session_idle_ttl_days: int = 14
 
+    # Stream/WebSocket access tickets (#30)
+    # HMAC secret for signing the short-lived tickets that authorize media
+    # streaming and the WebSocket handshake (replacing the session token that
+    # used to ride those URLs as ?token=). It MUST be identical across every
+    # worker and survive restarts: a ticket minted by one worker is verified by
+    # any worker, so a per-process value would cause sporadic auth failures.
+    # Leave blank to have the app generate one once and persist it under
+    # config_path (stable for a single-host deployment sharing that volume); set
+    # it explicitly across multiple hosts, or to rotate all outstanding tickets.
+    stream_ticket_secret: str = ""
+
     # Trust X-Forwarded-For when deriving the client IP for PIN rate limiting.
     # Enable ONLY when running behind a single trusted reverse proxy that sets
     # this header; if clients can reach the app directly they could forge it to

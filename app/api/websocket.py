@@ -5,6 +5,7 @@ from collections import defaultdict
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 from app.api.auth import validate_token
+from app.utils.tickets import SCOPE_WS, TicketError, verify_ticket
 
 router = APIRouter(tags=["websocket"])
 logger = logging.getLogger(__name__)
@@ -17,14 +18,25 @@ _connections: dict[str, set[WebSocket]] = defaultdict(set)
 async def websocket_endpoint(
     websocket: WebSocket,
     user_id: str,
+    ticket: str | None = Query(None),
     token: str | None = Query(None),
 ) -> None:
     await websocket.accept()
 
-    # The token must resolve to a session belonging to this user.
-    token_user_id = await validate_token(token) if token else None
-    if token_user_id != user_id:
-        logger.info("WebSocket rejected (bad token): user=%s", user_id)
+    # Authorize this user via a short-lived ws ticket first, then fall back to
+    # the legacy session token (?token=). The ticket keeps the long-lived token
+    # out of the handshake URL; the fallback is kept during the transition (#30).
+    authorized = False
+    if ticket:
+        try:
+            verify_ticket(ticket, scope=SCOPE_WS, user_id=user_id)
+            authorized = True
+        except TicketError:
+            pass
+    if not authorized and token:
+        authorized = await validate_token(token) == user_id
+    if not authorized:
+        logger.info("WebSocket rejected (bad ticket/token): user=%s", user_id)
         await websocket.close(code=4401)
         return
 

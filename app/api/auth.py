@@ -24,6 +24,7 @@ from app.models.subscription import UserSubscription
 from app.models.user import User
 from app.models.user_queue import UserQueue
 from app.models.user_video_ref import UserVideoRef
+from app.schemas.ticket import AccessTicket
 from app.schemas.user import (
     UserCreate,
     UserProfile,
@@ -32,6 +33,7 @@ from app.schemas.user import (
     UserUpdate,
 )
 from app.services.storage import check_and_delete_orphan
+from app.utils.tickets import SCOPE_WS, mint_ticket
 from app.utils.time import utcnow_naive
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -398,6 +400,17 @@ async def create_profile(
 @router.get("/me", response_model=UserProfile)
 async def get_me(user: User = Depends(get_current_user)) -> UserProfile:
     return UserProfile.model_validate(user)
+
+
+@router.post("/ws-ticket", response_model=AccessTicket)
+async def create_ws_ticket(user: User = Depends(get_current_user)) -> AccessTicket:
+    """Mint a short-lived, user-scoped ticket for the WebSocket handshake (#30).
+
+    Session-authenticated; the returned ticket is passed to ``/ws/{user_id}`` as
+    ``?ticket=`` so the long-lived session token never rides the handshake URL.
+    """
+    ticket, expires_in = mint_ticket(SCOPE_WS, user.id)
+    return AccessTicket(ticket=ticket, expires_in=expires_in)
 
 
 @router.post("/logout")
