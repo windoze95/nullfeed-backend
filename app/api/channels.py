@@ -32,6 +32,7 @@ from app.tasks.download_tasks import (
     poll_all_channels_task,
     poll_channel_task,
 )
+from app.utils.search import escape_like
 
 logger = logging.getLogger(__name__)
 
@@ -85,10 +86,17 @@ async def _ensure_refs_for_channel(
 
 @router.get("", response_model=list[ChannelOut])
 async def list_channels(
+    q: str | None = Query(
+        None, description="Filter by channel name (case-insensitive)"
+    ),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[ChannelOut]:
-    result = await db.execute(select(Channel).order_by(Channel.name))
+    stmt = select(Channel)
+    if q and q.strip():
+        pattern = f"%{escape_like(q.strip())}%"
+        stmt = stmt.where(Channel.name.ilike(pattern, escape="\\"))
+    result = await db.execute(stmt.order_by(Channel.name))
     channels = result.scalars().all()
 
     # Per-channel video counts in a single GROUP BY query
