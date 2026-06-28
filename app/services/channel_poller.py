@@ -12,7 +12,9 @@ from app.models.video import Video
 from app.services.download_manager import (
     fetch_channel_images,
     fetch_channel_metadata,
+    fetch_channel_rss,
     fetch_channel_videos,
+    fetch_videos_metadata,
 )
 from app.services.progress_broadcaster import publish_new_episode
 from app.utils.time import utcnow_naive
@@ -64,9 +66,19 @@ def poll_single_channel(channel_id: str, db: Session) -> dict:
     # must never be auto-downloaded for FUTURE_ONLY subscribers.
     had_initial_poll = channel.last_checked_at is not None
 
-    # Fetch latest videos from YouTube
-    fetch_result = fetch_channel_videos(channel.youtube_channel_id)
-    yt_videos = fetch_result["videos"]
+    if not had_initial_poll:
+        # First-ever poll: ingest the back catalog via a full yt-dlp listing.
+        # The RSS feed only exposes the ~15 newest uploads, so using it here
+        # would permanently skip older videos.
+        yt_videos = fetch_channel_videos(channel.youtube_channel_id)["videos"]
+    else:
+        # Routine poll: cheap RSS conditional GET. Only genuinely-new video IDs
+        # fall through to yt-dlp for full metadata.
+        yt_videos = _discover_routine(channel, db)
+        if yt_videos is None:
+            # 304 Not Modified, or the feed surfaced no unseen videos: nothing
+            # to catalog. Validators + last_checked_at were already persisted.
+            return {"cataloged_ids": [], "auto_download_ids": []}
 
     cataloged_ids: list[str] = []
     new_video_ids: list[str] = []
@@ -145,6 +157,66 @@ def poll_single_channel(channel_id: str, db: Session) -> dict:
         _emit_new_episode_events(channel_id, new_videos_for_events, db)
 
     return {"cataloged_ids": cataloged_ids, "auto_download_ids": auto_download_ids}
+
+
+def _discover_routine(channel: Channel, db: Session) -> list[dict] | None:
+    """Routine (non-initial) discovery for a channel via its Atom upload feed.
+
+    Returns:
+      * a list of yt-dlp metadata dicts for genuinely-new video IDs (newest
+        first) for the caller to catalog;
+      * ``None`` when there is nothing to catalog — a 304 Not Modified, or a
+        fresh feed with no unseen video IDs. In that case the channel's
+        validators and ``last_checked_at`` are updated and committed here, so
+        the caller can return immediately.
+
+    Falls back to a full yt-dlp listing when RSS is unavailable for the channel
+    (handle/username id, network error, or unparseable feed), preserving the
+    original discovery behavior. That list is returned for the caller to catalog
+    exactly as the initial poll does.
+    """
+    rss = fetch_channel_rss(
+        channel.youtube_channel_id,
+        etag=channel.rss_etag,
+        last_modified=channel.rss_last_modified,
+    )
+
+    if rss["status"] == "unavailable":
+        return fetch_channel_videos(channel.youtube_channel_id)["videos"]
+
+    if rss["status"] == "not_modified":
+        # Feed unchanged since the last poll: no new uploads, no work to do.
+        channel.last_checked_at = utcnow_naive()
+        db.commit()
+        return None
+
+    # status == "ok": refresh the stored validators so the next poll can 304.
+    # These persist as part of the caller's commit (new IDs) or below (none).
+    channel.rss_etag = rss["etag"]
+    channel.rss_last_modified = rss["last_modified"]
+
+    feed_ids = [e["youtube_video_id"] for e in rss["entries"] if e["youtube_video_id"]]
+    new_ids: list[str] = []
+    if feed_ids:
+        existing = set(
+            db.execute(
+                select(Video.youtube_video_id).where(
+                    Video.youtube_video_id.in_(feed_ids)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        # feed_ids is newest-first; the comprehension preserves that order.
+        new_ids = [vid for vid in feed_ids if vid not in existing]
+
+    if not new_ids:
+        channel.last_checked_at = utcnow_naive()
+        db.commit()
+        return None
+
+    logger.info("RSS surfaced %d new video(s) for channel %s", len(new_ids), channel.id)
+    return fetch_videos_metadata(new_ids)
 
 
 def refresh_stale_channel_metadata(db: Session) -> int:

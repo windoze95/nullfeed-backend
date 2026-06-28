@@ -7,6 +7,7 @@ import subprocess
 import json
 import threading
 import time
+import xml.etree.ElementTree as ET
 from collections.abc import Callable
 
 import httpx
@@ -14,6 +15,16 @@ import httpx
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+# YouTube publishes a per-channel Atom feed of the ~15 newest uploads, keyed by
+# canonical UC channel id. Routine polling fetches this with a conditional GET
+# instead of a heavyweight yt-dlp playlist scan; see fetch_channel_rss.
+YOUTUBE_RSS_FEED_URL = "https://www.youtube.com/feeds/videos.xml"
+
+# Namespaces in the channel Atom feed. ElementTree matches tags by their
+# {namespace}localname form, so these are spelled out as prefixes.
+_ATOM_NS = "{http://www.w3.org/2005/Atom}"
+_YT_NS = "{http://www.youtube.com/xml/schemas/2015}"
 
 # --- Download watchdog tuning ---------------------------------------------
 # A live yt-dlp/aria2c download prints stdout lines constantly while fetching,
@@ -558,12 +569,21 @@ def fetch_channel_images(youtube_channel_id: str) -> dict:
         return {"avatar_url": None, "banner_url": None}
 
 
-def fetch_channel_videos(youtube_channel_id: str, max_videos: int = 50) -> dict:
+def fetch_channel_videos(
+    youtube_channel_id: str, max_videos: int | None = None
+) -> dict:
     """Fetch the latest video IDs from a channel using yt-dlp.
 
     Returns a dict with 'videos' list and 'channel_meta' with resolved
     channel name / canonical UC ID / handle from the playlist fields.
+
+    ``max_videos`` defaults to ``settings.catalog_fetch_count`` — the size of
+    the back catalog ingested on a channel's first poll. Routine polls no longer
+    use this path (they use the RSS feed), so this primarily bounds the initial
+    catalog.
     """
+    if max_videos is None:
+        max_videos = settings.catalog_fetch_count
     url = _build_channel_url(youtube_channel_id, "/videos")
 
     cmd = [
@@ -610,3 +630,142 @@ def fetch_channel_videos(youtube_channel_id: str, max_videos: int = 50) -> dict:
         logger.warning("Failed to fetch videos for %s: %s", youtube_channel_id, e)
 
     return {"videos": videos, "channel_meta": channel_meta}
+
+
+def _parse_rss_entries(xml_text: str) -> list[dict]:
+    """Parse a YouTube channel Atom feed into newest-first video entries.
+
+    Each entry yields ``youtube_video_id`` (the ``yt:videoId``), ``title`` and
+    ``published`` (raw ISO-8601 string, or None). The feed is already ordered
+    newest-first; we preserve that order.
+
+    The body comes from YouTube over HTTPS (a trusted source), so stdlib
+    ElementTree is used directly — no external-entity or untrusted-XML concerns
+    that would warrant a third-party parser.
+    """
+    root = ET.fromstring(xml_text)
+    entries: list[dict] = []
+    for entry in root.findall(f"{_ATOM_NS}entry"):
+        vid_el = entry.find(f"{_YT_NS}videoId")
+        video_id = (vid_el.text or "").strip() if vid_el is not None else ""
+        if not video_id:
+            continue
+        title_el = entry.find(f"{_ATOM_NS}title")
+        published_el = entry.find(f"{_ATOM_NS}published")
+        entries.append(
+            {
+                "youtube_video_id": video_id,
+                "title": (title_el.text or "").strip() if title_el is not None else "",
+                "published": published_el.text if published_el is not None else None,
+            }
+        )
+    return entries
+
+
+def fetch_channel_rss(
+    youtube_channel_id: str,
+    etag: str | None = None,
+    last_modified: str | None = None,
+) -> dict:
+    """Fetch a channel's Atom upload feed with an HTTP conditional GET.
+
+    Returns a dict whose ``status`` is one of:
+
+      * ``"not_modified"`` — server replied 304; nothing changed since the
+        stored validators, so the caller can short-circuit the poll entirely.
+      * ``"ok"`` — a fresh feed; also carries ``entries`` (newest-first) and the
+        ``etag`` / ``last_modified`` response validators to persist.
+      * ``"unavailable"`` — RSS can't be used for this channel (the id isn't a
+        canonical UC id, the request failed, or the body didn't parse); the
+        caller should fall back to the yt-dlp listing.
+
+    The feed is addressable only by canonical UC id; handles/legacy usernames
+    aren't, so those report ``"unavailable"`` without a network call. Channels
+    are canonicalized to UC ids by the metadata-refresh job, so they converge
+    onto the cheap RSS path over time.
+    """
+    if not youtube_channel_id.startswith("UC"):
+        return {"status": "unavailable"}
+
+    headers: dict[str, str] = {}
+    if etag:
+        headers["If-None-Match"] = etag
+    if last_modified:
+        headers["If-Modified-Since"] = last_modified
+
+    url = f"{YOUTUBE_RSS_FEED_URL}?channel_id={youtube_channel_id}"
+    try:
+        resp = httpx.get(url, headers=headers, timeout=15, follow_redirects=True)
+    except Exception as e:
+        logger.warning("RSS fetch failed for %s: %s", youtube_channel_id, e)
+        return {"status": "unavailable"}
+
+    if resp.status_code == 304:
+        return {"status": "not_modified"}
+
+    if resp.status_code != 200:
+        logger.warning(
+            "RSS fetch for %s returned HTTP %s", youtube_channel_id, resp.status_code
+        )
+        return {"status": "unavailable"}
+
+    try:
+        entries = _parse_rss_entries(resp.text)
+    except Exception as e:
+        logger.warning("Failed to parse RSS for %s: %s", youtube_channel_id, e)
+        return {"status": "unavailable"}
+
+    return {
+        "status": "ok",
+        "entries": entries,
+        "etag": resp.headers.get("ETag"),
+        "last_modified": resp.headers.get("Last-Modified"),
+    }
+
+
+def fetch_videos_metadata(video_ids: list[str]) -> list[dict]:
+    """Fetch yt-dlp metadata for specific video IDs, preserving input order.
+
+    Used after RSS discovery surfaces genuinely-new uploads: only those IDs are
+    extracted (typically one or two), instead of re-scanning the whole channel.
+    Returns dicts shaped like ``fetch_channel_videos`` entries; IDs that fail to
+    extract (private, removed, geo-blocked) are simply omitted.
+    """
+    if not video_ids:
+        return []
+
+    urls = [f"https://www.youtube.com/watch?v={vid}" for vid in video_ids]
+    cmd = ["yt-dlp", "--dump-json", "--no-playlist", *urls]
+
+    by_id: dict[str, dict] = {}
+    try:
+        # One video may fail (returncode != 0) while others succeed, so parse
+        # whatever JSON lines came back regardless of the exit status.
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        for line in result.stdout.strip().split("\n"):
+            if not line.strip():
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            vid = data.get("id", "")
+            if vid:
+                by_id[vid] = {
+                    "youtube_video_id": vid,
+                    "title": data.get("title", ""),
+                    "duration_seconds": int(data.get("duration") or 0),
+                    "upload_date": data.get("upload_date"),
+                }
+        if result.returncode != 0:
+            logger.warning(
+                "yt-dlp metadata fetch returned %s for %d id(s); got %d",
+                result.returncode,
+                len(video_ids),
+                len(by_id),
+            )
+    except Exception as e:
+        logger.warning("Failed to fetch metadata for %s: %s", video_ids, e)
+
+    # Preserve the requested (newest-first) order; drop any that didn't resolve.
+    return [by_id[vid] for vid in video_ids if vid in by_id]
