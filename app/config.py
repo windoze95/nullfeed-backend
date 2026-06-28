@@ -9,6 +9,9 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
 
     # Downloads
+    # Number of videos pulled from the full yt-dlp listing when a channel is
+    # cataloged for the first time (its back catalog). Routine polls use the RSS
+    # feed instead, so this only bounds that initial ingest.
     catalog_fetch_count: int = 50
     download_concurrency: int = 2
     media_quality: str = "1080p"

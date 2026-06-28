@@ -324,9 +324,10 @@ async def poll_channel_now(
 ) -> dict:
     """Poll one channel synchronously so pull-to-refresh shows new uploads.
 
-    A single-channel poll is one yt-dlp call (a few seconds) — fast enough
-    to run inline. Auto-download candidates are enqueued exactly as the
-    scheduled poll task does.
+    For an already-cataloged channel this is a cheap RSS conditional GET (often
+    a 304 with no further work); only genuinely-new uploads fall through to
+    yt-dlp. Fast enough to run inline. Auto-download candidates are enqueued
+    exactly as the scheduled poll task does.
     """
     result = await db.execute(select(Channel.id).where(Channel.id == channel_id))
     if result.scalar_one_or_none() is None:

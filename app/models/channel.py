@@ -25,6 +25,11 @@ class Channel(Base):
     metadata_refreshed_at: Mapped[datetime | None] = mapped_column(
         DateTime, nullable=True
     )
+    # HTTP cache validators for the channel's Atom upload feed. Sent back as
+    # If-None-Match / If-Modified-Since on the next routine poll so an unchanged
+    # feed returns 304 Not Modified and the poll short-circuits with no yt-dlp.
+    rss_etag: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    rss_last_modified: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     videos = relationship("Video", back_populates="channel", lazy="select")
     subscriptions = relationship(
