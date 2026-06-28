@@ -6,6 +6,11 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.models import Base
 from app.utils.time import utcnow_naive
 
+# Ref "kind": how the user came to hold this video, which decides whether it
+# counts as part of their library or is just an evictable play cache.
+REF_KIND_LIBRARY = "LIBRARY"  # explicit intent: download, subscription, watch
+REF_KIND_CACHE = "CACHE"  # implicit: created by playing a not-downloaded video
+
 
 class UserVideoRef(Base):
     __tablename__ = "user_video_refs"
@@ -24,6 +29,16 @@ class UserVideoRef(Base):
     added_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow_naive)
     removed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_watched_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # See REF_KIND_*. LIBRARY refs are the user's collection (shown in the
+    # library/Downloads, governed by per-subscription retention); CACHE refs are
+    # created by playing a not-yet-downloaded video and are evicted by the cache
+    # reaper (LRU), so playing never silently builds a collection.
+    kind: Mapped[str] = mapped_column(
+        String(20),
+        default=REF_KIND_LIBRARY,
+        server_default=REF_KIND_LIBRARY,
+        nullable=False,
+    )
 
     user = relationship("User", back_populates="video_refs")
     video = relationship("Video", back_populates="user_refs")

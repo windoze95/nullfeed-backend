@@ -59,6 +59,13 @@ celery_app.conf.beat_schedule = {
         "task": "app.tasks.download_tasks.enforce_retention_task",
         "schedule": settings.retention_interval_hours * 3600,
     },
+    # Evict the play cache: keep each user's most-recently-watched cache videos
+    # (queued ones pinned) and reclaim the rest. Same cadence/cost profile as the
+    # retention sweep — indexed per-user queries, a few hours' latency is fine.
+    "enforce-video-cache": {
+        "task": "app.tasks.download_tasks.enforce_video_cache_task",
+        "schedule": settings.cache_retention_interval_hours * 3600,
+    },
 }
 
 # WebSub (PubSubHubbub) subscription upkeep — only scheduled when a public

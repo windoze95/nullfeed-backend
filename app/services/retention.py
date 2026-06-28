@@ -26,7 +26,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session as DBSession
 
 from app.models.subscription import UserSubscription
-from app.models.user_video_ref import UserVideoRef
+from app.models.user_video_ref import REF_KIND_LIBRARY, UserVideoRef
 from app.models.video import Video
 from app.services.storage import check_and_delete_orphan_sync
 from app.utils.time import utcnow_naive
@@ -70,6 +70,9 @@ def _refs_to_drop_for_subscription(
                     Video.status == "COMPLETE",
                     UserVideoRef.user_id == sub.user_id,
                     UserVideoRef.removed_at.is_(None),
+                    # Subscription retention governs the collection only; cache
+                    # refs are evicted separately by the cache reaper.
+                    UserVideoRef.kind == REF_KIND_LIBRARY,
                 )
                 .order_by(
                     func.coalesce(Video.uploaded_at, Video.created_at).desc(),
