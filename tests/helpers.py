@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.channel import Channel
 from app.models.subscription import UserSubscription
+from app.models.user_queue import UserQueue
 from app.models.user_video_ref import UserVideoRef
 from app.models.video import Video
 
@@ -108,3 +109,13 @@ async def seed_subscription(
     db.add(sub)
     await db.commit()
     return sub
+
+
+async def seed_queue(
+    db: AsyncSession, user_id: str, video_id: str, **kwargs: Any
+) -> UserQueue:
+    """Seed a watch-later queue row. Pass ``added_at`` for deterministic order."""
+    item = UserQueue(user_id=user_id, video_id=video_id, **kwargs)
+    db.add(item)
+    await db.commit()
+    return item

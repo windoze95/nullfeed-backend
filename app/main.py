@@ -12,7 +12,17 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 import os
 
-from app.api import auth, channels, discover, feed, health, videos, websocket, youtube
+from app.api import (
+    auth,
+    channels,
+    discover,
+    feed,
+    health,
+    queue,
+    videos,
+    websocket,
+    youtube,
+)
 from app.config import settings
 from app.services.progress_broadcaster import start_progress_listener
 
@@ -106,6 +116,7 @@ app.include_router(health.router)
 app.include_router(auth.router)
 app.include_router(channels.router)
 app.include_router(videos.router)
+app.include_router(queue.router)
 app.include_router(feed.router)
 app.include_router(discover.router)
 app.include_router(websocket.router)

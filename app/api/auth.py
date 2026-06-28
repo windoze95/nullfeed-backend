@@ -22,6 +22,7 @@ from app.models.recommendation import Recommendation
 from app.models.session import Session
 from app.models.subscription import UserSubscription
 from app.models.user import User
+from app.models.user_queue import UserQueue
 from app.models.user_video_ref import UserVideoRef
 from app.schemas.user import (
     UserCreate,
@@ -494,6 +495,7 @@ async def delete_profile(
     video_ids = list(refs_result.scalars().all())
 
     await db.execute(delete(UserVideoRef).where(UserVideoRef.user_id == user_id))
+    await db.execute(delete(UserQueue).where(UserQueue.user_id == user_id))
     await db.execute(
         delete(UserSubscription).where(UserSubscription.user_id == user_id)
     )
