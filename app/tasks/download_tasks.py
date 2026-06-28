@@ -57,11 +57,17 @@ def _get_sync_db() -> Session:
     bind=True,
     max_retries=0,
 )
-def poll_all_channels_task(self) -> dict:
-    """Periodic task: poll all subscribed channels for new videos."""
+def poll_all_channels_task(self, due_only: bool = False) -> dict:
+    """Poll subscribed channels for new videos.
+
+    The beat passes ``due_only=True`` so each frequent run only polls channels
+    whose adaptive schedule has come due. An explicit "refresh everything"
+    request (the pull-to-refresh endpoint) calls it with the default
+    ``due_only=False`` to poll every subscribed channel now.
+    """
     db = _get_sync_db()
     try:
-        auto_download_ids = poll_all_channels(db)
+        auto_download_ids = poll_all_channels(db, due_only=due_only)
 
         # Only enqueue auto-download candidates (not blanket PENDING sweep)
         enqueued = 0

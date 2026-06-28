@@ -26,9 +26,13 @@ celery_app.conf.update(
 
 # Periodic tasks
 celery_app.conf.beat_schedule = {
-    "poll-all-channels": {
+    # Wake frequently and poll only channels whose adaptive schedule is due.
+    # Each wake is cheap: a due-check query plus, for due channels, an RSS
+    # conditional GET that usually 304s.
+    "poll-due-channels": {
         "task": "app.tasks.download_tasks.poll_all_channels_task",
         "schedule": settings.check_interval_minutes * 60,
+        "kwargs": {"due_only": True},
     },
     "refresh-stale-channel-metadata": {
         "task": "app.tasks.download_tasks.refresh_stale_channel_metadata_task",

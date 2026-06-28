@@ -1,10 +1,11 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, String, Text
+from sqlalchemy import DateTime, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models import Base
+from app.utils.time import utcnow_naive
 
 
 class Channel(Base):
@@ -30,6 +31,17 @@ class Channel(Base):
     # feed returns 304 Not Modified and the poll short-circuits with no yt-dlp.
     rss_etag: Mapped[str | None] = mapped_column(String(255), nullable=True)
     rss_last_modified: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Adaptive poll cadence. The beat polls only channels whose next_poll_at has
+    # passed; poll_interval_minutes is the current spacing, narrowed toward the
+    # floor after a poll that finds uploads and widened toward the cap after an
+    # empty one. Defaults make a newly added channel due immediately and start it
+    # at the responsive floor (mirrors settings.poll_interval_floor_minutes).
+    next_poll_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=utcnow_naive, index=True
+    )
+    poll_interval_minutes: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=15
+    )
 
     videos = relationship("Video", back_populates="channel", lazy="select")
     subscriptions = relationship(
