@@ -3,6 +3,7 @@ import os
 import time
 from datetime import datetime
 
+from celery import group
 from celery.signals import worker_ready
 from sqlalchemy import create_engine, select, update
 from sqlalchemy.orm import Session, sessionmaker
@@ -14,7 +15,8 @@ from app.models.channel import Channel
 from app.models.subscription import UserSubscription
 from app.models.video import Video
 from app.services.channel_poller import (
-    poll_all_channels,
+    _backoff_failed_channel,
+    list_channel_ids_to_poll,
     poll_single_channel,
     refresh_stale_channel_metadata,
 )
@@ -58,29 +60,34 @@ def _get_sync_db() -> Session:
     max_retries=0,
 )
 def poll_all_channels_task(self, due_only: bool = False) -> dict:
-    """Poll subscribed channels for new videos.
+    """Fan the channel poll out into one isolated per-channel job each.
 
-    The beat passes ``due_only=True`` so each frequent run only polls channels
-    whose adaptive schedule has come due. An explicit "refresh everything"
-    request (the pull-to-refresh endpoint) calls it with the default
-    ``due_only=False`` to poll every subscribed channel now.
+    The beat passes ``due_only=True`` so each frequent run only enumerates the
+    channels whose adaptive schedule has come due; the pull-to-refresh "poll
+    all" endpoint calls it with the default ``due_only=False`` to refresh every
+    subscribed channel now. Either way this task does only the cheap, indexed
+    due-check here and dispatches a Celery GROUP of ``poll_channel_task`` jobs,
+    one per channel. Each job runs on its OWN DB session, so a single slow or
+    stuck channel (yt-dlp/RSS) no longer blocks or aborts the others, and each
+    job reschedules and enqueues auto-downloads for its own channel.
     """
     db = _get_sync_db()
     try:
-        auto_download_ids = poll_all_channels(db, due_only=due_only)
-
-        # Only enqueue auto-download candidates (not blanket PENDING sweep)
-        enqueued = 0
-        for video_id in auto_download_ids:
-            download_video_task.delay(video_id)
-            enqueued += 1
-
-        return {"status": "ok", "enqueued": enqueued}
+        channel_ids = list_channel_ids_to_poll(db, due_only=due_only)
     except Exception:
-        logger.exception("Error in poll_all_channels_task")
+        logger.exception("Error enumerating channels to poll")
         return {"status": "error"}
     finally:
         db.close()
+
+    if not channel_ids:
+        return {"status": "ok", "dispatched": 0}
+
+    group(poll_channel_task.s(channel_id) for channel_id in channel_ids).apply_async()
+    logger.info(
+        "Dispatched %d per-channel poll jobs (due_only=%s)", len(channel_ids), due_only
+    )
+    return {"status": "ok", "dispatched": len(channel_ids)}
 
 
 @celery_app.task(
@@ -89,7 +96,15 @@ def poll_all_channels_task(self, due_only: bool = False) -> dict:
     max_retries=0,
 )
 def poll_channel_task(self, channel_id: str) -> dict:
-    """Poll a single channel and enqueue downloads for auto-download candidates."""
+    """Poll a single channel and enqueue downloads for auto-download candidates.
+
+    The unit of work the periodic fan-out dispatches (also the immediate poll on
+    subscribe). Runs on its own DB session and absorbs its own failures so one
+    channel can't affect another: on error it rolls back and widens the
+    channel's adaptive cadence — exactly what the old sequential loop did — so a
+    persistently broken channel backs off instead of being re-dispatched every
+    beat.
+    """
     db = _get_sync_db()
     try:
         result = poll_single_channel(channel_id, db)
@@ -105,6 +120,8 @@ def poll_channel_task(self, channel_id: str) -> dict:
         }
     except Exception:
         logger.exception("Error polling channel %s", channel_id)
+        db.rollback()
+        _backoff_failed_channel(channel_id, db)
         return {"status": "error"}
     finally:
         db.close()
