@@ -155,10 +155,44 @@ def poll_single_channel(channel_id: str, db: Session) -> dict:
             db.commit()
             return {"cataloged_ids": [], "auto_download_ids": []}
 
+    # The routine poll updates last_checked_at and the adaptive cadence as part
+    # of the catalog commit; the initial poll only catalogs (no prior schedule).
+    return _catalog_videos(
+        channel,
+        yt_videos,
+        db,
+        had_initial_poll=had_initial_poll,
+        update_schedule=True,
+    )
+
+
+def _catalog_videos(
+    channel: Channel,
+    yt_videos: list[dict],
+    db: Session,
+    *,
+    had_initial_poll: bool,
+    update_schedule: bool,
+) -> dict:
+    """Insert genuinely-new videos from a metadata batch and fan out the rest.
+
+    Shared by the routine poll and the WebSub push handler. ``yt_videos`` is a
+    list of yt-dlp metadata dicts (newest-first). New videos are inserted
+    CATALOGED, subscriber refs are ensured, FUTURE_ONLY auto-download candidates
+    flip to PENDING, and — only when ``had_initial_poll`` (so back-catalog
+    ingestion stays silent) — a new_episode event + push is emitted per
+    subscriber/new video.
+
+    When ``update_schedule`` is set (the poller) ``last_checked_at`` and the
+    adaptive cadence are folded into the same commit; the WebSub path passes
+    ``False`` so the poll schedule (the RSS fallback) is left entirely untouched.
+    Returns ``{"cataloged_ids", "auto_download_ids"}``.
+    """
+    channel_id = channel.id
     cataloged_ids: list[str] = []
     new_video_ids: list[str] = []
     new_videos_for_events: list[dict] = []
-    # Every video this poll touched (new rows plus already-cataloged ones seen
+    # Every video this batch touched (new rows plus already-cataloged ones seen
     # in the feed); a single batched ref-ensure runs over them after the loop.
     video_ids_for_refs: list[str] = []
 
@@ -181,7 +215,7 @@ def poll_single_channel(channel_id: str, db: Session) -> dict:
     # yt-dlp returns the channel feed newest-first. Cataloged videos have no
     # upload date until downloaded, and listings fall back to created_at — so
     # stamp each new row with a synthetic timestamp that decreases down the
-    # feed, preserving the feed order within this poll batch.
+    # feed, preserving the feed order within this batch.
     poll_started_at = utcnow_naive()
 
     for index, yt_vid in enumerate(yt_videos):
@@ -232,7 +266,7 @@ def poll_single_channel(channel_id: str, db: Session) -> dict:
         )
         logger.info("New video cataloged: %s (%s)", yt_video_id, video.title)
 
-    # One batched ref-ensure over every video this poll touched, instead of the
+    # One batched ref-ensure over every video this batch touched, instead of the
     # per-video, per-subscriber N+1 the old per-video helper issued.
     _ensure_user_refs_bulk(video_ids_for_refs, channel_id, db)
 
@@ -243,10 +277,11 @@ def poll_single_channel(channel_id: str, db: Session) -> dict:
             new_video_ids, channel_id, db, had_initial_poll
         )
 
-    channel.last_checked_at = utcnow_naive()
-    # New rows -> the channel looks active, shorten toward the floor; an empty
-    # poll -> looks dormant, lengthen toward the cap.
-    _reschedule_channel(channel, found_new=bool(cataloged_ids))
+    if update_schedule:
+        channel.last_checked_at = utcnow_naive()
+        # New rows -> the channel looks active, shorten toward the floor; an
+        # empty poll -> looks dormant, lengthen toward the cap.
+        _reschedule_channel(channel, found_new=bool(cataloged_ids))
     db.commit()
 
     # Notify subscribers about genuinely new episodes — never the back catalog
@@ -255,6 +290,68 @@ def poll_single_channel(channel_id: str, db: Session) -> dict:
         _emit_new_episode_events(channel_id, new_videos_for_events, db)
 
     return {"cataloged_ids": cataloged_ids, "auto_download_ids": auto_download_ids}
+
+
+def ingest_pushed_videos(
+    channel_id: str, youtube_video_ids: list[str], db: Session
+) -> dict:
+    """Catalog WebSub-pushed video IDs for a channel via the normal poll path.
+
+    The near-real-time counterpart to :func:`poll_single_channel`: instead of
+    polling the Atom feed, YouTube's hub pushed the new video ids to our
+    callback. We catalog the genuinely-new ones — skipping any already known, so
+    the duplicate pushes the hub commonly sends are idempotent — exactly as the
+    RSS discovery path does via :func:`_catalog_videos`, emitting new_episode
+    events + pushes. The adaptive poll schedule is deliberately left untouched so
+    the RSS poller remains the unchanged fallback.
+
+    Returns ``{"cataloged_ids", "auto_download_ids"}`` like the poller.
+    """
+    empty: dict = {"cataloged_ids": [], "auto_download_ids": []}
+
+    channel = db.get(Channel, channel_id)
+    if channel is None:
+        logger.warning("WebSub ingest: channel %s not found", channel_id)
+        return empty
+
+    # A channel that has never been polled has no back-catalog baseline; defer to
+    # the poller for the initial ingest rather than treating a push as a flood of
+    # "new" episodes (and spamming notifications for the back catalog).
+    if channel.last_checked_at is None:
+        logger.info(
+            "WebSub ingest: channel %s has no initial poll yet; deferring to poller",
+            channel_id,
+        )
+        return empty
+
+    # Idempotency: keep only ids we have never cataloged, deduped and order-
+    # preserving. A duplicate push thus resolves to an empty set and does no
+    # yt-dlp work. _catalog_videos re-checks under the same transaction too, so
+    # this is also safe under concurrent pushes.
+    candidate_ids = [vid for vid in dict.fromkeys(youtube_video_ids) if vid]
+    if not candidate_ids:
+        return empty
+    known = set(
+        db.execute(
+            select(Video.youtube_video_id).where(
+                Video.youtube_video_id.in_(candidate_ids)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    new_ids = [vid for vid in candidate_ids if vid not in known]
+    if not new_ids:
+        return empty
+
+    logger.info("WebSub push: %d new video(s) for channel %s", len(new_ids), channel_id)
+    yt_videos = fetch_videos_metadata(new_ids)
+    if not yt_videos:
+        return empty
+
+    return _catalog_videos(
+        channel, yt_videos, db, had_initial_poll=True, update_schedule=False
+    )
 
 
 def _discover_routine(channel: Channel, db: Session) -> list[dict] | None:

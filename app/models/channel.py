@@ -42,6 +42,12 @@ class Channel(Base):
     poll_interval_minutes: Mapped[int] = mapped_column(
         Integer, nullable=False, default=15
     )
+    # WebSub (PubSubHubbub) lease expiry, when the optional near-real-time
+    # subscriber is enabled. NULL means no active hub subscription (never
+    # subscribed, or the feature is off); the subscribe beat task renews each
+    # channel before this passes. Independent of the poll cadence above, which
+    # remains the always-on fallback.
+    websub_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     videos = relationship("Video", back_populates="channel", lazy="select")
     subscriptions = relationship(
