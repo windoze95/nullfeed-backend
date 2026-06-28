@@ -39,9 +39,18 @@ from app.config import settings
 SCOPE_STREAM = "stream"
 SCOPE_WS = "ws"
 
-# Tickets are deliberately short-lived: long enough to start playback / open the
-# socket, short enough that a leaked URL expires before it is useful.
+# WS tickets are deliberately short-lived: long enough to open the socket, short
+# enough that a leaked handshake URL expires before it is useful. (The socket is
+# authorized once, at connect.)
 TICKET_TTL_SECONDS = 300  # 5 minutes
+
+# Stream tickets must outlive a whole playback session: media is fetched via many
+# HTTP Range requests over the video's duration (plus pauses), and each request
+# re-verifies the ticket — a 5-minute TTL would break any video longer than that.
+# A stream ticket is narrowly scoped to ONE video for ONE user (read-only), so a
+# multi-hour TTL keeps the blast radius of a leaked URL tiny while letting long
+# videos play through.
+STREAM_TICKET_TTL_SECONDS = 12 * 3600  # 12 hours
 
 # Filename of the auto-generated secret persisted under settings.config_path.
 _SECRET_FILENAME = "stream_ticket_secret"
