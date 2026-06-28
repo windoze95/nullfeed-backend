@@ -25,6 +25,11 @@ from app.schemas.video import (
     VideoProgress,
     VideoSearchPage,
 )
+from app.services.instant_stream import (
+    InstantStreamError,
+    resolve_progressive_url,
+    stream_proxy,
+)
 from app.services.media_server import build_media_response
 from app.services.progress_broadcaster import publish_progress_updated
 from app.services.storage import check_and_delete_orphan
@@ -485,6 +490,51 @@ async def stream_video(
         raise HTTPException(status_code=404, detail="Video file missing from disk")
 
     return build_media_response(file_path, range_header)
+
+
+@router.get("/{video_id}/instant-stream")
+async def instant_stream(
+    video_id: str,
+    ticket: str | None = None,
+    token: str | None = None,
+    x_user_token: str | None = Header(None),
+    db: AsyncSession = Depends(get_db),
+    range_header: str | None = Header(None, alias="Range"),
+) -> Response:
+    """Stream something playable *right now* for a not-yet-downloaded video (#85).
+
+    Removes the cold-press wait: instead of generating and waiting on a whole
+    preview file, the backend resolves a progressive source URL and proxies it,
+    so playback starts as the first bytes arrive (~1-2s). The HQ download and
+    the seamless in-player swap are unchanged and handled separately.
+
+    If a full HQ file already exists we serve that directly — strictly better,
+    and it avoids a needless upstream round-trip; otherwise we proxy the source.
+    """
+    await _authorize_stream(video_id, ticket, token, x_user_token, db)
+
+    result = await db.execute(select(Video).where(Video.id == video_id))
+    video = result.scalar_one_or_none()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    # Defensive fast path: a client may hit this for a video that already
+    # finished downloading; serve the local file rather than proxying the source.
+    if video.status == "COMPLETE" and video.file_path:
+        file_path = video.file_path
+        if not os.path.isabs(file_path):
+            file_path = os.path.join(settings.media_path, file_path)
+        if os.path.exists(file_path):
+            return build_media_response(file_path, range_header)
+
+    try:
+        url = await asyncio.to_thread(resolve_progressive_url, video.youtube_video_id)
+        return await stream_proxy(url, range_header)
+    except InstantStreamError as exc:
+        logger.warning("instant-stream resolve/proxy failed for %s: %s", video_id, exc)
+        raise HTTPException(
+            status_code=502, detail="Could not start instant stream"
+        ) from exc
 
 
 @router.put("/{video_id}/progress")
