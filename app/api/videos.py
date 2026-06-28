@@ -31,7 +31,13 @@ from app.services.storage import check_and_delete_orphan
 from app.tasks.download_tasks import download_preview_task, download_video_task
 from app.utils.pagination import decode_cursor, encode_cursor
 from app.utils.search import escape_like
-from app.utils.tickets import SCOPE_STREAM, TicketError, mint_ticket, verify_ticket
+from app.utils.tickets import (
+    SCOPE_STREAM,
+    STREAM_TICKET_TTL_SECONDS,
+    TicketError,
+    mint_ticket,
+    verify_ticket,
+)
 from app.utils.time import utcnow_naive
 
 router = APIRouter(prefix="/api/videos", tags=["videos"])
@@ -391,7 +397,9 @@ async def create_playback_ticket(
     exists = await db.scalar(select(Video.id).where(Video.id == video_id))
     if not exists:
         raise HTTPException(status_code=404, detail="Video not found")
-    ticket, expires_in = mint_ticket(SCOPE_STREAM, user.id, video_id=video_id)
+    ticket, expires_in = mint_ticket(
+        SCOPE_STREAM, user.id, video_id=video_id, ttl_seconds=STREAM_TICKET_TTL_SECONDS
+    )
     return AccessTicket(ticket=ticket, expires_in=expires_in)
 
 
