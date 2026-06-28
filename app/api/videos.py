@@ -3,9 +3,9 @@ import logging
 import os
 from datetime import timedelta
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import Response
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -13,14 +13,23 @@ from sqlalchemy.orm import selectinload
 from app.api.auth import get_current_user, validate_token
 from app.config import settings
 from app.database import get_db
+from app.models.channel import Channel
 from app.models.user import User
 from app.models.user_video_ref import UserVideoRef
 from app.models.video import Video
-from app.schemas.video import DownloadRequest, VideoDetail, VideoOut, VideoProgress
+from app.schemas.video import (
+    DownloadRequest,
+    VideoDetail,
+    VideoOut,
+    VideoProgress,
+    VideoSearchPage,
+)
 from app.services.media_server import build_media_response
 from app.services.progress_broadcaster import publish_progress_updated
 from app.services.storage import check_and_delete_orphan
 from app.tasks.download_tasks import download_preview_task, download_video_task
+from app.utils.pagination import decode_cursor, encode_cursor
+from app.utils.search import escape_like
 from app.utils.time import utcnow_naive
 
 router = APIRouter(prefix="/api/videos", tags=["videos"])
@@ -47,6 +56,108 @@ async def _ensure_active_ref(db: AsyncSession, user_id: str, video_id: str) -> N
     )
     await db.execute(stmt)
     await db.commit()
+
+
+@router.get("", response_model=VideoSearchPage)
+async def search_videos(
+    q: str | None = Query(None, description="Match video title or channel name"),
+    status: str | None = Query(None, description="Exact video status"),
+    watched: bool | None = Query(None, description="Filter by watched state"),
+    channel_id: str | None = Query(None),
+    cursor: str | None = Query(None),
+    limit: int = Query(20, ge=1, le=100),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> VideoSearchPage:
+    """Search the caller's video library by title and/or channel name.
+
+    Scoped to the user's active refs (like the feed endpoints), so results are
+    only videos the user holds. An empty/absent ``q`` lists the whole library
+    (subject to the other filters). Ordered newest-first with cursor pagination.
+    """
+    sort_key = func.coalesce(Video.uploaded_at, Video.created_at)
+
+    filters = [
+        UserVideoRef.user_id == user.id,
+        UserVideoRef.removed_at.is_(None),
+    ]
+    if q and q.strip():
+        pattern = f"%{escape_like(q.strip())}%"
+        filters.append(
+            or_(
+                Video.title.ilike(pattern, escape="\\"),
+                Channel.name.ilike(pattern, escape="\\"),
+            )
+        )
+    if status:
+        filters.append(Video.status == status)
+    if watched is not None:
+        filters.append(UserVideoRef.is_watched == watched)
+    if channel_id:
+        filters.append(Video.channel_id == channel_id)
+
+    total = (
+        await db.scalar(
+            select(func.count())
+            .select_from(UserVideoRef)
+            .join(Video, UserVideoRef.video_id == Video.id)
+            .join(Channel, Video.channel_id == Channel.id)
+            .where(*filters)
+        )
+        or 0
+    )
+
+    page_filters = list(filters)
+    if cursor:
+        decoded = decode_cursor(cursor)
+        if decoded is None:
+            raise HTTPException(status_code=400, detail="Invalid cursor")
+        cur_sort, cur_id = decoded
+        page_filters.append(
+            or_(sort_key < cur_sort, and_(sort_key == cur_sort, Video.id < cur_id))
+        )
+
+    # Fetch one extra row to detect whether another page exists.
+    result = await db.execute(
+        select(UserVideoRef, Video, Channel)
+        .join(Video, UserVideoRef.video_id == Video.id)
+        .join(Channel, Video.channel_id == Channel.id)
+        .where(*page_filters)
+        .order_by(sort_key.desc(), Video.id.desc())
+        .limit(limit + 1)
+    )
+    rows = result.all()
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+
+    items = [
+        VideoOut(
+            id=video.id,
+            youtube_video_id=video.youtube_video_id,
+            channel_id=video.channel_id,
+            title=video.title,
+            duration_seconds=video.duration_seconds,
+            uploaded_at=video.uploaded_at,
+            file_size_bytes=video.file_size_bytes or 0,
+            status=video.status,
+            preview_status=video.preview_status,
+            thumbnail_url=f"/data/thumbnails/{video.youtube_video_id}.jpg",
+            watch_position_seconds=ref.watch_position_seconds,
+            is_watched=ref.is_watched,
+            last_watched_at=ref.last_watched_at,
+            channel_name=channel.name,
+        )
+        for ref, video, channel in rows
+    ]
+
+    next_cursor = None
+    if has_more and rows:
+        _, last_video, _ = rows[-1]
+        next_cursor = encode_cursor(
+            last_video.uploaded_at or last_video.created_at, last_video.id
+        )
+
+    return VideoSearchPage(items=items, total=total, next_cursor=next_cursor)
 
 
 @router.get("/downloads", response_model=list[VideoOut])

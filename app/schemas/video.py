@@ -43,3 +43,15 @@ class VideoPagination(BaseModel):
     total: int
     page: int
     per_page: int
+
+
+class VideoSearchPage(BaseModel):
+    """Cursor-paginated search results.
+
+    ``next_cursor`` is an opaque token for the next page, or ``None`` on the last
+    page. ``total`` is the full count of matching rows, independent of the cursor.
+    """
+
+    items: list[VideoOut]
+    total: int
+    next_cursor: str | None = None
