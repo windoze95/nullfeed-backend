@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, JSON, String
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, Integer, JSON, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models import Base
@@ -10,6 +10,12 @@ from app.utils.time import utcnow_naive
 
 class Video(Base):
     __tablename__ = "videos"
+    __table_args__ = (
+        # /new-episodes ranks each channel's unwatched videos with a window
+        # function (PARTITION BY channel_id ORDER BY uploaded_at DESC) to pick
+        # the newest per channel; this composite serves that partition+order.
+        Index("ix_videos_channel_id_uploaded_at", "channel_id", "uploaded_at"),
+    )
 
     id: Mapped[str] = mapped_column(
         String(36), primary_key=True, default=lambda: str(uuid.uuid4())

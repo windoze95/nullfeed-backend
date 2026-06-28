@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth import get_current_user
@@ -89,12 +89,24 @@ async def _new_episodes_items(
     if not subscribed_ids:
         return []
 
-    # One query for all unwatched videos across subscribed channels; keep the
-    # newest unwatched video per channel.
-    result = await db.execute(
-        select(UserVideoRef, Video, Channel)
-        .join(Video, UserVideoRef.video_id == Video.id)
-        .join(Channel, Video.channel_id == Channel.id)
+    # Rank each unwatched, completed video within its channel so the dedup-to-
+    # newest-per-channel happens in SQL. The window function runs over the
+    # already-filtered set (this user's unwatched, non-removed, COMPLETE videos
+    # in subscribed channels), so rank 1 is the newest *unwatched* per channel.
+    # Pushing this into the DB keeps latency tied to ``limit`` rather than the
+    # size of the subscribed library (the old code loaded every such row and
+    # deduped in Python).
+    ranked = (
+        select(
+            Video.id.label("video_id"),
+            func.row_number()
+            .over(
+                partition_by=Video.channel_id,
+                order_by=(Video.uploaded_at.desc(), Video.id.desc()),
+            )
+            .label("rn"),
+        )
+        .join(UserVideoRef, UserVideoRef.video_id == Video.id)
         .where(
             UserVideoRef.user_id == user.id,
             UserVideoRef.removed_at.is_(None),
@@ -102,25 +114,29 @@ async def _new_episodes_items(
             Video.channel_id.in_(subscribed_ids),
             Video.status == "COMPLETE",
         )
-        .order_by(Video.uploaded_at.desc().nullslast())
+        .subquery()
     )
 
-    items = []
-    seen_channels: set[str] = set()
-    for ref, video, channel in result.all():
-        if channel.id in seen_channels:
-            continue
-        seen_channels.add(channel.id)
-        items.append(
-            FeedItem(
-                channel=_channel_out(channel),
-                video=_video_out(video, ref),
-            )
+    result = await db.execute(
+        select(UserVideoRef, Video, Channel)
+        .join(Video, UserVideoRef.video_id == Video.id)
+        .join(Channel, Video.channel_id == Channel.id)
+        .join(ranked, ranked.c.video_id == Video.id)
+        .where(
+            UserVideoRef.user_id == user.id,
+            ranked.c.rn == 1,
         )
-        if len(items) >= limit:
-            break
+        .order_by(Video.uploaded_at.desc().nullslast())
+        .limit(limit)
+    )
 
-    return items
+    return [
+        FeedItem(
+            channel=_channel_out(channel),
+            video=_video_out(video, ref),
+        )
+        for ref, video, channel in result.all()
+    ]
 
 
 async def _recently_added_items(
