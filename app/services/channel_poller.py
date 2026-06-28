@@ -72,15 +72,15 @@ def _backoff_failed_channel(channel_id: str, db: Session) -> None:
         db.rollback()
 
 
-def poll_all_channels(db: Session, *, due_only: bool = False) -> list[str]:
-    """Poll subscribed channels and return aggregated auto-download video IDs.
+def list_channel_ids_to_poll(db: Session, *, due_only: bool = False) -> list[str]:
+    """Return the distinct subscribed channel ids that should be polled.
 
-    When ``due_only`` is set (the periodic beat), only channels whose
-    ``next_poll_at`` has passed are polled, so each frequent run does work
-    proportional to how many channels are actually due instead of re-polling
-    every channel every time. When unset (an explicit "refresh everything"
-    request, e.g. pull-to-refresh) every subscribed channel is polled now,
-    regardless of its schedule.
+    When ``due_only`` is set (the periodic beat) only channels whose adaptive
+    schedule has come due (``next_poll_at <= now``) are returned — a cheap,
+    indexed query the beat runs on every wake to decide how much work to fan
+    out. When unset (an explicit "refresh everything" request, e.g.
+    pull-to-refresh) every subscribed channel is returned regardless of its
+    schedule. This is the work list the beat dispatches one per-channel job per.
     """
     stmt = (
         select(Channel.id)
@@ -90,7 +90,19 @@ def poll_all_channels(db: Session, *, due_only: bool = False) -> list[str]:
     if due_only:
         stmt = stmt.where(Channel.next_poll_at <= utcnow_naive())
 
-    channel_ids = [row[0] for row in db.execute(stmt).all()]
+    return [row[0] for row in db.execute(stmt).all()]
+
+
+def poll_all_channels(db: Session, *, due_only: bool = False) -> list[str]:
+    """Poll subscribed channels in-process and return auto-download video IDs.
+
+    Synchronous reference path: every due (or every subscribed, when
+    ``due_only`` is unset) channel is polled sequentially on the one ``db``
+    session. Production fans the same work out into isolated per-channel Celery
+    jobs (see ``app.tasks.download_tasks.poll_all_channels_task``); this helper
+    is retained for direct/inline use and is exercised by the adaptive tests.
+    """
+    channel_ids = list_channel_ids_to_poll(db, due_only=due_only)
     logger.info("Polling %d channels (due_only=%s)", len(channel_ids), due_only)
 
     all_auto_download_ids: list[str] = []
@@ -145,6 +157,25 @@ def poll_single_channel(channel_id: str, db: Session) -> dict:
     cataloged_ids: list[str] = []
     new_video_ids: list[str] = []
     new_videos_for_events: list[dict] = []
+    # Every video this poll touched (new rows plus already-cataloged ones seen
+    # in the feed); a single batched ref-ensure runs over them after the loop.
+    video_ids_for_refs: list[str] = []
+
+    # Batch the existence check: one query maps every feed id we already have to
+    # its row id, replacing the per-video SELECT. id_by_ytid also absorbs rows
+    # created during this loop so a duplicate feed entry resolves as existing
+    # instead of being inserted twice.
+    feed_ids = [v["youtube_video_id"] for v in yt_videos if v.get("youtube_video_id")]
+    id_by_ytid: dict[str, str] = {}
+    if feed_ids:
+        id_by_ytid = {
+            ytid: row_id
+            for row_id, ytid in db.execute(
+                select(Video.id, Video.youtube_video_id).where(
+                    Video.youtube_video_id.in_(feed_ids)
+                )
+            ).all()
+        }
 
     # yt-dlp returns the channel feed newest-first. Cataloged videos have no
     # upload date until downloaded, and listings fall back to created_at — so
@@ -157,14 +188,11 @@ def poll_single_channel(channel_id: str, db: Session) -> dict:
         if not yt_video_id:
             continue
 
-        # Check if video already exists
-        existing = db.execute(
-            select(Video).where(Video.youtube_video_id == yt_video_id)
-        ).scalar_one_or_none()
-
-        if existing:
-            # Video exists; ensure all subscribers have a reference.
-            _ensure_user_refs(existing, channel_id, db)
+        existing_id = id_by_ytid.get(yt_video_id)
+        if existing_id is not None:
+            # Already cataloged (or created earlier in this same feed batch);
+            # just ensure refs exist for it in the batched pass below.
+            video_ids_for_refs.append(existing_id)
             continue
 
         # Parse upload_date into uploaded_at (stored as naive UTC)
@@ -188,10 +216,10 @@ def poll_single_channel(channel_id: str, db: Session) -> dict:
         )
         db.add(video)
         db.flush()
+        # Record so a duplicate id later in this same feed resolves as existing.
+        id_by_ytid[yt_video_id] = video.id
 
-        # Create user video refs for all subscribers
-        _ensure_user_refs(video, channel_id, db)
-
+        video_ids_for_refs.append(video.id)
         new_video_ids.append(video.id)
         cataloged_ids.append(video.id)
         new_videos_for_events.append(
@@ -202,6 +230,10 @@ def poll_single_channel(channel_id: str, db: Session) -> dict:
             }
         )
         logger.info("New video cataloged: %s (%s)", yt_video_id, video.title)
+
+    # One batched ref-ensure over every video this poll touched, instead of the
+    # per-video, per-subscriber N+1 the old per-video helper issued.
+    _ensure_user_refs_bulk(video_ids_for_refs, channel_id, db)
 
     # Determine auto-download candidates based on subscriber tracking modes
     auto_download_ids: list[str] = []
@@ -452,23 +484,44 @@ def _emit_new_episode_events(channel_id: str, videos: list[dict], db: Session) -
         )
 
 
-def _ensure_user_refs(video: Video, channel_id: str, db: Session) -> None:
-    """Ensure all subscribers of a channel have a UserVideoRef for this video."""
-    sub_result = db.execute(
-        select(UserSubscription.user_id).where(
-            UserSubscription.channel_id == channel_id
-        )
+def _ensure_user_refs_bulk(video_ids: list[str], channel_id: str, db: Session) -> None:
+    """Ensure every subscriber of the channel has a UserVideoRef per video.
+
+    Batched to a bounded number of queries regardless of how many videos this
+    poll touched or how many subscribers the channel has: one query for the
+    subscriber ids and one for the refs that already exist across the whole
+    (subscriber x video) set, then a single set-difference insert. Replaces the
+    per-video, per-subscriber N+1 the old per-video helper issued; mirrors the
+    batched pattern in app/api/channels.py::_ensure_refs_for_channel.
+
+    Keeps the prior create-if-missing semantics: an already-present ref is left
+    untouched, so a soft-removed ref (removed_at set) is not resurrected.
+    """
+    unique_video_ids = list(dict.fromkeys(video_ids))
+    if not unique_video_ids:
+        return
+
+    subscriber_ids = [
+        row[0]
+        for row in db.execute(
+            select(UserSubscription.user_id).where(
+                UserSubscription.channel_id == channel_id
+            )
+        ).all()
+    ]
+    if not subscriber_ids:
+        return
+
+    existing_pairs = set(
+        db.execute(
+            select(UserVideoRef.user_id, UserVideoRef.video_id).where(
+                UserVideoRef.user_id.in_(subscriber_ids),
+                UserVideoRef.video_id.in_(unique_video_ids),
+            )
+        ).all()
     )
-    subscriber_ids = [row[0] for row in sub_result.all()]
 
     for user_id in subscriber_ids:
-        existing_ref = db.execute(
-            select(UserVideoRef).where(
-                UserVideoRef.user_id == user_id,
-                UserVideoRef.video_id == video.id,
-            )
-        ).scalar_one_or_none()
-
-        if not existing_ref:
-            ref = UserVideoRef(user_id=user_id, video_id=video.id)
-            db.add(ref)
+        for video_id in unique_video_ids:
+            if (user_id, video_id) not in existing_pairs:
+                db.add(UserVideoRef(user_id=user_id, video_id=video_id))
