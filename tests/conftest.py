@@ -28,6 +28,7 @@ import app.api.auth as auth_api
 import app.api.websocket as websocket_api
 import app.services.push_gateway as push_gateway
 import app.services.youtube_import as youtube_import
+import app.utils.websub as websub_util
 from app.database import engine
 from app.main import app
 from app.models import Base
@@ -42,6 +43,7 @@ def _reset_in_memory_state():
     youtube_import._suggestions_cache.clear()
     websocket_api._connections.clear()
     push_gateway._reset_cache()
+    websub_util._reset_cache()
 
 
 @pytest_asyncio.fixture

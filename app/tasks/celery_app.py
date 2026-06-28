@@ -60,3 +60,15 @@ celery_app.conf.beat_schedule = {
         "schedule": settings.retention_interval_hours * 3600,
     },
 }
+
+# WebSub (PubSubHubbub) subscription upkeep — only scheduled when a public
+# callback URL is configured, so the feature is entirely absent when disabled.
+# Renews each tracked channel's hub lease before it lapses; every 6h gives
+# several renewal attempts inside the default 5-day lease's renewal window, and
+# is cheap (one indexed query that hits the network only for channels actually
+# due). Discovery keeps working via RSS polling regardless.
+if settings.websub_callback_url:
+    celery_app.conf.beat_schedule["sync-websub-subscriptions"] = {
+        "task": "app.tasks.download_tasks.sync_websub_subscriptions_task",
+        "schedule": 6 * 3600,
+    }

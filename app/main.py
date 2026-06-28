@@ -22,6 +22,7 @@ from app.api import (
     queue,
     videos,
     websocket,
+    websub,
     youtube,
 )
 from app.config import settings
@@ -123,6 +124,7 @@ app.include_router(discover.router)
 app.include_router(websocket.router)
 app.include_router(youtube.router)
 app.include_router(push.router)
+app.include_router(websub.router)
 
 
 # ---------------------------------------------------------------------------

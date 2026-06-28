@@ -16,6 +16,7 @@ from app.models.subscription import UserSubscription
 from app.models.video import Video
 from app.services.channel_poller import (
     _backoff_failed_channel,
+    ingest_pushed_videos,
     list_channel_ids_to_poll,
     poll_single_channel,
     refresh_stale_channel_metadata,
@@ -29,6 +30,7 @@ from app.services.download_manager import (
 from app.services.download_reaper import reap_stuck_downloads
 from app.services.retention import enforce_retention
 from app.services.session_reaper import reap_expired_sessions
+from app.services.websub import sync_subscriptions
 from app.utils.time import utcnow_naive
 from app.services.progress_broadcaster import (
     publish_download_complete,
@@ -123,6 +125,60 @@ def poll_channel_task(self, channel_id: str) -> dict:
         logger.exception("Error polling channel %s", channel_id)
         db.rollback()
         _backoff_failed_channel(channel_id, db)
+        return {"status": "error"}
+    finally:
+        db.close()
+
+
+@celery_app.task(
+    name="app.tasks.download_tasks.ingest_websub_push_task",
+    bind=True,
+    max_retries=0,
+)
+def ingest_websub_push_task(self, channel_id: str, youtube_video_ids: list) -> dict:
+    """Catalog WebSub-pushed video ids off the callback request path.
+
+    The callback verifies the push signature and dispatches this job so the
+    (possibly slow) yt-dlp metadata fetch never blocks the hub's HTTP request.
+    Runs on its own DB session, catalogs only genuinely-new ids (idempotent for
+    the duplicate pushes the hub commonly sends), and enqueues any auto-download
+    candidates exactly as a normal poll would.
+    """
+    db = _get_sync_db()
+    try:
+        result = ingest_pushed_videos(channel_id, youtube_video_ids, db)
+        for video_id in result["auto_download_ids"]:
+            download_video_task.delay(video_id)
+        return {
+            "status": "ok",
+            "cataloged": len(result["cataloged_ids"]),
+            "auto_downloads": len(result["auto_download_ids"]),
+        }
+    except Exception:
+        logger.exception("Error ingesting WebSub push for channel %s", channel_id)
+        db.rollback()
+        return {"status": "error"}
+    finally:
+        db.close()
+
+
+@celery_app.task(
+    name="app.tasks.download_tasks.sync_websub_subscriptions_task",
+    bind=True,
+    max_retries=0,
+)
+def sync_websub_subscriptions_task(self) -> dict:
+    """Periodic task: (re)subscribe tracked UC channels to the WebSub hub.
+
+    No-ops when WebSub is disabled (blank callback URL). Otherwise subscribes
+    each tracked channel whose lease is missing or near expiry, renewing before
+    it lapses. Independent of polling, which stays the always-on fallback.
+    """
+    db = _get_sync_db()
+    try:
+        return sync_subscriptions(db)
+    except Exception:
+        logger.exception("Error syncing WebSub subscriptions")
         return {"status": "error"}
     finally:
         db.close()

@@ -84,6 +84,32 @@ class Settings(BaseSettings):
         default="", validation_alias="NULLFEED_PUSH_ENROLL_TOKEN"
     )
 
+    # WebSub / PubSubHubbub subscriber (near-real-time new uploads)
+    # When enabled, NullFeed subscribes each tracked UC channel to YouTube's
+    # WebSub hub so the hub PUSHES new-upload notifications to our public
+    # callback, instead of waiting for the next adaptive RSS poll. It is a pure
+    # accelerator layered on top of polling: RSS + adaptive polling stays the
+    # always-on fallback, and everything here no-ops when disabled.
+    #
+    # websub_callback_url is the PUBLIC https URL the hub will call back; it must
+    # be reachable from the internet and resolve to GET/POST /api/websub/callback
+    # (e.g. https://nullfeed.example.com/api/websub/callback). Leave it BLANK to
+    # disable WebSub entirely — the callback router 404s and the subscribe beat
+    # task no-ops, leaving polling untouched. websub_hub_url is Google's public
+    # hub; websub_lease_seconds is the subscription lease we request and renew
+    # before (default 5 days).
+    websub_callback_url: str = Field(
+        default="", validation_alias="NULLFEED_WEBSUB_CALLBACK_URL"
+    )
+    websub_hub_url: str = Field(
+        default="https://pubsubhubbub.appspot.com/subscribe",
+        validation_alias="NULLFEED_WEBSUB_HUB_URL",
+    )
+    websub_lease_seconds: int = Field(
+        default=432000,  # 5 days
+        validation_alias="NULLFEED_WEBSUB_LEASE_SECONDS",
+    )
+
     # File permissions
     puid: int = 1000
     pgid: int = 1000
