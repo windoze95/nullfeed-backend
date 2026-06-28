@@ -15,8 +15,21 @@ class Settings(BaseSettings):
     catalog_fetch_count: int = 50
     download_concurrency: int = 2
     media_quality: str = "1080p"
-    check_interval_minutes: int = 60
     metadata_refresh_interval_hours: int = 12
+
+    # Polling cadence (adaptive, per channel).
+    # The beat wakes every check_interval_minutes and polls only the channels
+    # that are DUE (next_poll_at <= now); each wake is cheap (a due-check query
+    # plus, for due channels, an RSS conditional GET that usually 304s). After a
+    # poll, a channel's interval moves by poll_interval_backoff_factor: it is
+    # divided (toward the floor) when new uploads are found and multiplied
+    # (toward the cap) when the poll is empty, so busy channels settle near the
+    # floor and dormant ones near the cap. Keep check_interval_minutes <= the
+    # floor so a channel that comes due is polled promptly.
+    check_interval_minutes: int = 5
+    poll_interval_floor_minutes: int = 15
+    poll_interval_cap_minutes: int = 240
+    poll_interval_backoff_factor: float = 2.0
 
     # Auth sessions
     # A session is rejected once it is older than the absolute TTL (since

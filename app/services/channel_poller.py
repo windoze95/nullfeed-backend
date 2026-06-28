@@ -29,16 +29,69 @@ def _as_naive_utc(value: datetime | None) -> datetime | None:
     return value
 
 
-def poll_all_channels(db: Session) -> list[str]:
-    """Poll all channels that have at least one subscriber.
-    Returns aggregated list of auto-download video IDs."""
-    result = db.execute(
+def _reschedule_channel(channel: Channel, *, found_new: bool) -> None:
+    """Recompute a channel's next poll time from this poll's outcome.
+
+    Multiplicative backoff bounded by a configurable floor and cap: a poll that
+    found new uploads divides the interval by the backoff factor (toward the
+    floor, since the channel looks active); an empty poll multiplies it (toward
+    the cap, since the channel looks dormant). With the beat polling only DUE
+    channels, the effective cadence converges on each channel's observed upload
+    frequency. Mutates the channel in place; the caller commits.
+    """
+    from app.config import settings
+
+    floor = settings.poll_interval_floor_minutes
+    # Coerce the bounds so a misconfiguration can never invert them or divide by
+    # zero, which would otherwise produce a nonsensical schedule.
+    cap = max(floor, settings.poll_interval_cap_minutes)
+    factor = settings.poll_interval_backoff_factor or 1.0
+
+    current = channel.poll_interval_minutes or floor
+    interval = current / factor if found_new else current * factor
+    interval = max(floor, min(cap, int(round(interval))))
+
+    channel.poll_interval_minutes = interval
+    channel.next_poll_at = utcnow_naive() + timedelta(minutes=interval)
+
+
+def _backoff_failed_channel(channel_id: str, db: Session) -> None:
+    """Push a failed channel's next poll out so it doesn't retry every beat.
+
+    Called after a poll raised and the session was rolled back, so it reloads
+    the channel in a fresh transaction. Best-effort: a failure here must not
+    abort the rest of the batch, so it only logs.
+    """
+    try:
+        channel = db.get(Channel, channel_id)
+        if channel is not None:
+            _reschedule_channel(channel, found_new=False)
+            db.commit()
+    except Exception:
+        logger.exception("Could not back off failed channel %s", channel_id)
+        db.rollback()
+
+
+def poll_all_channels(db: Session, *, due_only: bool = False) -> list[str]:
+    """Poll subscribed channels and return aggregated auto-download video IDs.
+
+    When ``due_only`` is set (the periodic beat), only channels whose
+    ``next_poll_at`` has passed are polled, so each frequent run does work
+    proportional to how many channels are actually due instead of re-polling
+    every channel every time. When unset (an explicit "refresh everything"
+    request, e.g. pull-to-refresh) every subscribed channel is polled now,
+    regardless of its schedule.
+    """
+    stmt = (
         select(Channel.id)
         .join(UserSubscription, UserSubscription.channel_id == Channel.id)
         .distinct()
     )
-    channel_ids = [row[0] for row in result.all()]
-    logger.info("Polling %d channels", len(channel_ids))
+    if due_only:
+        stmt = stmt.where(Channel.next_poll_at <= utcnow_naive())
+
+    channel_ids = [row[0] for row in db.execute(stmt).all()]
+    logger.info("Polling %d channels (due_only=%s)", len(channel_ids), due_only)
 
     all_auto_download_ids: list[str] = []
     for channel_id in channel_ids:
@@ -48,6 +101,10 @@ def poll_all_channels(db: Session) -> list[str]:
         except Exception:
             logger.exception("Error polling channel %s", channel_id)
             db.rollback()
+            # The frequent beat would otherwise retry a persistently failing
+            # channel every wake; widen its cadence so it backs off like an
+            # empty poll instead of hot-looping.
+            _backoff_failed_channel(channel_id, db)
 
     return all_auto_download_ids
 
@@ -77,7 +134,12 @@ def poll_single_channel(channel_id: str, db: Session) -> dict:
         yt_videos = _discover_routine(channel, db)
         if yt_videos is None:
             # 304 Not Modified, or the feed surfaced no unseen videos: nothing
-            # to catalog. Validators + last_checked_at were already persisted.
+            # to catalog. Record the poll and, since it was empty, widen the
+            # cadence toward the cap. _discover_routine refreshed any validators
+            # on the session; this commit persists them alongside next_poll_at.
+            channel.last_checked_at = utcnow_naive()
+            _reschedule_channel(channel, found_new=False)
+            db.commit()
             return {"cataloged_ids": [], "auto_download_ids": []}
 
     cataloged_ids: list[str] = []
@@ -149,6 +211,9 @@ def poll_single_channel(channel_id: str, db: Session) -> dict:
         )
 
     channel.last_checked_at = utcnow_naive()
+    # New rows -> the channel looks active, shorten toward the floor; an empty
+    # poll -> looks dormant, lengthen toward the cap.
+    _reschedule_channel(channel, found_new=bool(cataloged_ids))
     db.commit()
 
     # Notify subscribers about genuinely new episodes — never the back catalog
@@ -166,9 +231,10 @@ def _discover_routine(channel: Channel, db: Session) -> list[dict] | None:
       * a list of yt-dlp metadata dicts for genuinely-new video IDs (newest
         first) for the caller to catalog;
       * ``None`` when there is nothing to catalog — a 304 Not Modified, or a
-        fresh feed with no unseen video IDs. In that case the channel's
-        validators and ``last_checked_at`` are updated and committed here, so
-        the caller can return immediately.
+        fresh feed with no unseen video IDs. On the ``ok`` path the refreshed
+        HTTP validators are written to the session so the caller's commit
+        persists them; the caller records ``last_checked_at``, reschedules the
+        channel, and commits.
 
     Falls back to a full yt-dlp listing when RSS is unavailable for the channel
     (handle/username id, network error, or unparseable feed), preserving the
@@ -186,12 +252,10 @@ def _discover_routine(channel: Channel, db: Session) -> list[dict] | None:
 
     if rss["status"] == "not_modified":
         # Feed unchanged since the last poll: no new uploads, no work to do.
-        channel.last_checked_at = utcnow_naive()
-        db.commit()
         return None
 
     # status == "ok": refresh the stored validators so the next poll can 304.
-    # These persist as part of the caller's commit (new IDs) or below (none).
+    # These persist as part of the caller's single commit.
     channel.rss_etag = rss["etag"]
     channel.rss_last_modified = rss["last_modified"]
 
@@ -211,8 +275,6 @@ def _discover_routine(channel: Channel, db: Session) -> list[dict] | None:
         new_ids = [vid for vid in feed_ids if vid not in existing]
 
     if not new_ids:
-        channel.last_checked_at = utcnow_naive()
-        db.commit()
         return None
 
     logger.info("RSS surfaced %d new video(s) for channel %s", len(new_ids), channel.id)
