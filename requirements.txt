@@ -6,6 +6,10 @@ aiosqlite==0.20.0
 celery==5.4.0
 redis==5.2.1
 yt-dlp==2026.6.9
+# yt-dlp plugin: fetches a PO token from the bundled bgutil provider (see
+# Dockerfile/entrypoint) so YouTube's cookie-authenticated SABR-only formats are
+# downloadable — required for age-restricted playback.
+bgutil-ytdlp-pot-provider==1.3.1
 anthropic==0.43.0
 pydantic==2.10.4
 pydantic-settings==2.7.1

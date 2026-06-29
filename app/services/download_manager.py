@@ -304,17 +304,29 @@ def download_preview(
     video_id: str,
 ) -> dict:
     """
-    Download a low-quality pre-muxed 360p preview. Returns metadata dict on success.
-    No split streams, no merge step — fast and lightweight.
-    Raises RuntimeError on failure.
+    Download a low-quality (~360-480p) preview. Returns metadata dict on success.
+
+    Prefers a pre-muxed progressive file (fast, no merge). Falls back to muxing a
+    ≤480p video+audio pair for videos YouTube only serves as SABR/adaptive —
+    notably age-restricted ones, which the bundled po_token provider makes
+    downloadable but which have no progressive stream, so this fallback is the
+    only way they get a playable file (and thus the only cold-press path that
+    works for them). Raises RuntimeError on failure.
     """
     output_dir = os.path.join(settings.media_path, channel_slug)
     os.makedirs(output_dir, exist_ok=True)
 
     output_template = os.path.join(output_dir, f"{video_id}_preview.%(ext)s")
 
-    # Pre-muxed formats only — no merge needed
-    format_str = "best[height<=360][ext=mp4]/best[height<=480][ext=mp4]/worst[ext=mp4]"
+    # Progressive first (no merge); then an adaptive video+audio pair to mux for
+    # SABR-only videos (age-restricted) that have no progressive format.
+    format_str = (
+        "best[height<=360][ext=mp4]"
+        "/best[height<=480][ext=mp4]"
+        "/bestvideo[height<=480][vcodec^=avc1]+bestaudio[acodec^=mp4a]"
+        "/bestvideo[height<=480]+bestaudio"
+        "/worst[ext=mp4]"
+    )
 
     url = f"https://www.youtube.com/watch?v={youtube_video_id}"
 
@@ -323,6 +335,10 @@ def download_preview(
         *cookie_args(),
         "--format",
         format_str,
+        # Only takes effect when the adaptive fallback is selected (a merge);
+        # harmless for the progressive branch.
+        "--merge-output-format",
+        "mp4",
         "--output",
         output_template,
         "--no-playlist",
@@ -341,7 +357,9 @@ def download_preview(
             cmd,
             capture_output=True,
             text=True,
-            timeout=120,
+            # Muxing an adaptive ≤480p pair (the age-restricted path) downloads
+            # the full A/V streams, so allow more than the progressive case.
+            timeout=300,
         )
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"Preview download timed out for {youtube_video_id}")
