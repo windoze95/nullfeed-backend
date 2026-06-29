@@ -25,6 +25,7 @@ from app.api import (
     websub,
     youtube,
 )
+from app.api import settings as settings_api
 from app.config import settings
 from app.services.progress_broadcaster import start_progress_listener
 
@@ -125,6 +126,7 @@ app.include_router(websocket.router)
 app.include_router(youtube.router)
 app.include_router(push.router)
 app.include_router(websub.router)
+app.include_router(settings_api.router)
 
 
 # Serve the Flutter web app, baked into the image at /app/web by the Dockerfile's

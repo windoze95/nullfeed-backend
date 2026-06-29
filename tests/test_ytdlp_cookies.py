@@ -31,6 +31,43 @@ def test_cookie_args_missing_explicit_path_is_empty(monkeypatch, tmp_path):
     assert ytdlp.cookie_args() == []
 
 
+def test_save_status_and_clear(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "youtube_cookies_file", "")
+    monkeypatch.setattr(settings, "config_path", str(tmp_path))
+    assert ytdlp.cookies_status()["configured"] is False
+
+    ytdlp.save_cookies(
+        "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\tA\tB\n"
+    )
+    st = ytdlp.cookies_status()
+    assert st["configured"] is True
+    assert st["stale"] is False
+    assert st["updated_at"]
+
+    ytdlp.clear_cookies()
+    assert ytdlp.cookies_status()["configured"] is False
+
+
+def test_note_extraction_error_marks_stale_only_with_cookies(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "youtube_cookies_file", "")
+    monkeypatch.setattr(settings, "config_path", str(tmp_path))
+
+    # No cookies configured -> an age-gate error is 'missing', never 'stale'.
+    ytdlp.note_extraction_error("ERROR: Sign in to confirm your age")
+    assert ytdlp.cookies_status()["stale"] is False
+
+    ytdlp.save_cookies("# Netscape\n.youtube.com\tTRUE\t/\tTRUE\t0\tA\tB\n")
+    # A non-age-gate failure doesn't flag the cookies.
+    ytdlp.note_extraction_error("ERROR: HTTP Error 404")
+    assert ytdlp.cookies_status()["stale"] is False
+    # An age-gate failure WITH cookies present means they likely expired.
+    ytdlp.note_extraction_error("ERROR: Sign in to confirm your age")
+    assert ytdlp.cookies_status()["stale"] is True
+    # Re-saving clears the stale flag.
+    ytdlp.save_cookies("# Netscape\n.youtube.com\tTRUE\t/\tTRUE\t0\tA\tC\n")
+    assert ytdlp.cookies_status()["stale"] is False
+
+
 def test_resolve_command_includes_cookies(monkeypatch):
     """The instant-stream resolve splices the cookie args into the yt-dlp call."""
     captured: dict = {}
