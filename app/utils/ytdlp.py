@@ -24,9 +24,12 @@ from app.config import settings
 
 _NETSCAPE_HEADERS = ("# Netscape HTTP Cookie File", "# HTTP Cookie File")
 
-# Stable, public, non-restricted video used to check cookies actually work on
-# save (so "connected" means verified, not just "a file exists").
-_PROBE_VIDEO_ID = "dQw4w9WgXcQ"
+# Probe videos used to verify cookies on save (so "connected" means verified).
+# The age-restricted one is the meaningful test — the whole point of cookies is
+# age-restricted playback — with the normal one as a fallback to tell "session
+# broken" from "session ok but not age-authorized".
+_AGE_PROBE_VIDEO_ID = "HtVdAasjOgU"  # stable age-restricted (yt-dlp test video)
+_PROBE_VIDEO_ID = "dQw4w9WgXcQ"  # stable, public, non-restricted
 
 # Substrings in a yt-dlp error that mean "the cookies aren't working" — surfaced
 # to the admin so they know to refresh/fix them rather than guessing.
@@ -103,17 +106,12 @@ def normalize_cookies(content: str) -> str:
     return out + "\n"
 
 
-def verify_cookies() -> str | None:
-    """Check yt-dlp can actually use the saved cookies, so the UI only reports
-    "connected" when they work.
-
-    Returns a short error string if the cookies aren't working (bad format, or a
-    rejected/expired session), else None. Only cookie-related failures count — a
-    problem with the probe video itself is ignored.
-    """
+def _probe_error(video_id: str) -> str | None:
+    """``yt-dlp --simulate`` with the saved cookies; the last error line, or None
+    on success / no cookies / a slow probe."""
     path = cookies_path()
     if path is None:
-        return "No cookies file."
+        return None
     cmd = [
         "yt-dlp",
         "--cookies",
@@ -121,25 +119,48 @@ def verify_cookies() -> str | None:
         "--simulate",
         "--no-warnings",
         "--no-playlist",
-        f"https://www.youtube.com/watch?v={_PROBE_VIDEO_ID}",
+        f"https://www.youtube.com/watch?v={video_id}",
     ]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     except (subprocess.TimeoutExpired, OSError):
-        return None  # don't block the save on a slow/odd probe
+        return None
     if result.returncode == 0:
         return None
     err = (result.stderr or result.stdout or "").strip()
-    if any(m in err.lower() for m in _COOKIE_TROUBLE_MARKERS):
-        line = next(
-            (
-                ln.strip()
-                for ln in err.splitlines()
-                if any(m in ln.lower() for m in _COOKIE_TROUBLE_MARKERS)
-            ),
-            err,
+    lines = [ln.strip() for ln in err.splitlines() if "error" in ln.lower()]
+    chosen = lines[-1] if lines else (err.splitlines() or [""])[-1]
+    return chosen[:300]
+
+
+def verify_cookies() -> str | None:
+    """Verify the saved cookies actually work, so the UI reports "connected" only
+    when true. Returns a short reason string if not working, else None.
+
+    Probes an *age-restricted* video (the whole point of cookies). If it resolves
+    the cookies fully work; an age gate means the session loads but isn't
+    age-authorized; a malformed-file / bot error is surfaced verbatim. A failure
+    unrelated to cookies (e.g. the probe video was removed) falls back to a
+    normal video so a genuinely broken session is still caught.
+    """
+    if cookies_path() is None:
+        return "No cookies file."
+    age_err = _probe_error(_AGE_PROBE_VIDEO_ID)
+    if age_err is None:
+        return None  # age-restricted resolved → fully working
+    low = age_err.lower()
+    if "confirm your age" in low or "inappropriate for some users" in low:
+        return (
+            "Cookies load, but don't unlock age-restricted videos — the account "
+            "may not be age-verified, or the cookies have gone stale. Re-export "
+            "from a browser that's signed in to YouTube."
         )
-        return line[:300]
+    if any(m in low for m in _COOKIE_TROUBLE_MARKERS):
+        return age_err
+    # Age probe failed for an unrelated reason; confirm the session at least.
+    normal_err = _probe_error(_PROBE_VIDEO_ID)
+    if normal_err and any(m in normal_err.lower() for m in _COOKIE_TROUBLE_MARKERS):
+        return normal_err
     return None
 
 
@@ -184,27 +205,33 @@ def _clear_error() -> None:
         pass
 
 
-def note_extraction_error(message: str) -> None:
-    """Record a cookie-related extraction failure so the UI can surface it.
+def set_cookies_error(message: str) -> None:
+    """Record a cookie problem so the settings UI surfaces it (cleared on save).
 
-    No-op unless cookies are configured and the error looks cookie-related
-    (works across the API + Celery processes via a file in the config volume).
+    Cross-process safe (a file in the config volume), so a failure seen in the
+    API or a Celery worker both reach the panel.
     """
+    try:
+        with open(_error_file(), "w", encoding="utf-8") as f:
+            f.write(message.strip()[:300])
+    except OSError:
+        pass
+
+
+def note_extraction_error(message: str) -> None:
+    """Record a cookie-related extraction failure (from the playback path) so the
+    UI can surface it. No-op unless cookies are configured and the error looks
+    cookie-related."""
     if cookies_path() is None:
         return
     lowered = message.lower()
     if not any(marker in lowered for marker in _COOKIE_TROUBLE_MARKERS):
         return
-    # Keep the most relevant single line, capped.
     line = next(
         (ln.strip() for ln in message.splitlines() if "error" in ln.lower()),
         message.strip().splitlines()[-1] if message.strip() else message,
     )
-    try:
-        with open(_error_file(), "w", encoding="utf-8") as f:
-            f.write(line[:300])
-    except OSError:
-        pass
+    set_cookies_error(line)
 
 
 def cookies_status() -> dict:
