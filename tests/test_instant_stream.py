@@ -1,5 +1,6 @@
 """Instant-start playback: progressive-URL resolve cache + reverse proxy (#85)."""
 
+import asyncio
 import os
 
 import httpx
@@ -142,6 +143,33 @@ async def test_instant_stream_resolve_failure_502(client, make_user, monkeypatch
         raise InstantStreamError("resolve failed")
 
     monkeypatch.setattr(videos_api, "resolve_progressive_url", boom)
+
+    resp = await client.get(f"/api/videos/{video.id}/instant-stream", headers=headers)
+    assert resp.status_code == 502
+
+
+async def test_instant_stream_first_byte_timeout_502(client, make_user, monkeypatch):
+    """A source that accepts the connection then stalls before responding is a
+    502 (so the client falls back), not an indefinite hang on the spinner."""
+    _, headers = await make_user()
+    async with async_session_factory() as db:
+        channel = await seed_channel(db)
+        video = await seed_video(db, channel, status="CATALOGED")
+
+    monkeypatch.setattr(
+        videos_api, "resolve_progressive_url", lambda vid: "https://upstream.test/v.mp4"
+    )
+    monkeypatch.setattr(instant_stream, "_FIRST_BYTE_TIMEOUT_SECONDS", 0.05)
+
+    async def stalled(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(1)  # never sends within the first-byte budget
+        return httpx.Response(200, content=b"")
+
+    monkeypatch.setattr(
+        instant_stream,
+        "_make_client",
+        lambda: httpx.AsyncClient(transport=httpx.MockTransport(stalled)),
+    )
 
     resp = await client.get(f"/api/videos/{video.id}/instant-stream", headers=headers)
     assert resp.status_code == 502

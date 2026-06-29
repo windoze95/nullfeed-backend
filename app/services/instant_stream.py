@@ -17,6 +17,7 @@ just makes the instant tier instant. Resolved URLs are cached briefly (they
 carry a multi-hour ``expire``), so repeat presses skip the resolve entirely.
 """
 
+import asyncio
 import logging
 import subprocess
 import threading
@@ -43,6 +44,13 @@ _PROGRESSIVE_FORMAT = (
 # download, so it should be quick; keep it tight so a wedged extract surfaces as
 # a 502 fast instead of hanging the player on a spinner.
 _RESOLVE_TIMEOUT_SECONDS = 30
+
+# Cap on time-to-first-byte from the upstream source. The body stream itself is
+# left untimed (``read=None``) so long playback isn't interrupted, but a source
+# that accepts the connection and then stalls before sending the response must
+# NOT hang the request forever — that's what leaves the player spinning on
+# "Preparing your video…". Surface it as a 502 so the client falls back.
+_FIRST_BYTE_TIMEOUT_SECONDS = 20
 
 # Fallback cache TTL when the source URL has no parseable ``expire``. Source
 # URLs typically last ~6h; we re-resolve well before that.
@@ -167,8 +175,11 @@ async def stream_proxy(url: str, range_header: str | None) -> StreamingResponse:
     client = _make_client()
     try:
         request = client.build_request("GET", url, headers=req_headers)
-        upstream = await client.send(request, stream=True)
-    except httpx.HTTPError as exc:
+        # Bound time-to-first-byte only; the body generator below streams
+        # untimed so long playback isn't cut off.
+        async with asyncio.timeout(_FIRST_BYTE_TIMEOUT_SECONDS):
+            upstream = await client.send(request, stream=True)
+    except (httpx.HTTPError, TimeoutError) as exc:
         await client.aclose()
         raise InstantStreamError(f"Upstream fetch failed: {exc}") from exc
 
