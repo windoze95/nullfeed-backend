@@ -326,6 +326,8 @@ def download_preview(
         "best[height<=360][ext=mp4]"
         "/bestvideo[height<=360][vcodec^=avc1]+bestaudio[acodec^=mp4a]"
         "/bestvideo[height<=480][vcodec^=avc1]+bestaudio[acodec^=mp4a]"
+        "/bestvideo[height<=720][vcodec^=avc1]+bestaudio[acodec^=mp4a]"
+        "/bestvideo[height<=720][vcodec^=avc1]+bestaudio"  # any audio if no m4a
         "/best[height<=480][ext=mp4]"
         "/worst[ext=mp4]"
     )
@@ -375,6 +377,31 @@ def download_preview(
     if result.returncode != 0:
         tail = (result.stderr or result.stdout or "").strip().splitlines()[-1:]
         detail = tail[0] if tail else "unknown error"
+        # "Requested format is not available" usually means the po_token provider
+        # is down (authenticated SABR formats stay hidden). Dump what yt-dlp does
+        # see so we can tell "no formats at all" (po_token) from "selector miss".
+        if "format is not available" in detail.lower():
+            try:
+                probe = subprocess.run(
+                    [
+                        "yt-dlp",
+                        *cookie_args(),
+                        "-F",
+                        "--no-warnings",
+                        "--no-playlist",
+                        url,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                logger.warning(
+                    "Available formats for %s (diagnostic):\n%s",
+                    youtube_video_id,
+                    (probe.stdout or probe.stderr or "(none)").strip()[-1800:],
+                )
+            except Exception:
+                logger.warning("Could not list formats for %s", youtube_video_id)
         raise RuntimeError(
             f"Preview download failed for {youtube_video_id}: {detail[:300]}"
         )
