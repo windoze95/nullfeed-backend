@@ -68,6 +68,42 @@ def test_note_extraction_error_marks_stale_only_with_cookies(monkeypatch, tmp_pa
     assert ytdlp.cookies_status()["stale"] is False
 
 
+def test_normalize_prepends_missing_header():
+    raw = ".youtube.com\tTRUE\t/\tTRUE\t0\tSID\tabc"
+    out = ytdlp.normalize_cookies(raw)
+    assert out.startswith("# Netscape HTTP Cookie File\n")
+    assert ytdlp.has_cookie_rows(out)
+
+
+def test_normalize_keeps_existing_header_and_strips_bom():
+    raw = "﻿# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\tA\tB"
+    out = ytdlp.normalize_cookies(raw)
+    assert out.count("# Netscape HTTP Cookie File") == 1
+    assert out.startswith("# Netscape HTTP Cookie File\n")
+
+
+def test_has_cookie_rows_rejects_non_cookies():
+    assert ytdlp.has_cookie_rows("just some words\nno tabs here") is False
+    assert ytdlp.has_cookie_rows("# Netscape HTTP Cookie File\n") is False
+    assert ytdlp.has_cookie_rows(".youtube.com\tTRUE\t/\tTRUE\t0\tA\tB") is True
+
+
+def test_status_surfaces_last_error(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "youtube_cookies_file", "")
+    monkeypatch.setattr(settings, "config_path", str(tmp_path))
+    ytdlp.save_cookies(".youtube.com\tTRUE\t/\tTRUE\t0\tA\tB")
+    assert ytdlp.cookies_status()["stale"] is False
+    ytdlp.note_extraction_error(
+        "ERROR: 'cookies.txt' does not look like a Netscape format cookies file"
+    )
+    st = ytdlp.cookies_status()
+    assert st["stale"] is True
+    assert "Netscape" in (st["last_error"] or "")
+    # Re-saving clears the error.
+    ytdlp.save_cookies(".youtube.com\tTRUE\t/\tTRUE\t0\tA\tC")
+    assert ytdlp.cookies_status()["stale"] is False
+
+
 def test_resolve_command_includes_cookies(monkeypatch):
     """The instant-stream resolve splices the cookie args into the yt-dlp call."""
     captured: dict = {}

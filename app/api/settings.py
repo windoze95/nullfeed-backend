@@ -12,7 +12,13 @@ from pydantic import BaseModel, Field
 
 from app.api.auth import get_current_user
 from app.models.user import User
-from app.utils.ytdlp import clear_cookies, cookies_status, save_cookies
+from app.utils.ytdlp import (
+    clear_cookies,
+    cookies_status,
+    has_cookie_rows,
+    normalize_cookies,
+    save_cookies,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/settings", tags=["settings"])
@@ -40,19 +46,19 @@ async def put_youtube_cookies(
 ) -> dict:
     """Store a pasted cookies.txt (Netscape format)."""
     _require_admin(user)
-    content = body.cookies.strip()
-    # Light sanity check so an obviously-wrong paste fails clearly rather than
-    # silently breaking every extraction. A cookies.txt is tab-separated and/or
-    # carries the standard Netscape header.
-    if "\t" not in content and "# Netscape" not in content and "# HTTP" not in content:
+    # Validate there are real cookie rows (yt-dlp aborts on a file that isn't a
+    # valid Netscape cookies file, which breaks every video). The missing header
+    # — the most common mistake — is repaired by save_cookies/normalize_cookies.
+    if not has_cookie_rows(normalize_cookies(body.cookies)):
         raise HTTPException(
             status_code=400,
             detail=(
-                "That doesn't look like a cookies.txt — export it in Netscape "
-                "format (e.g. the 'Get cookies.txt LOCALLY' browser extension)."
+                "That doesn't look like a cookies.txt — it has no cookie entries. "
+                "Export it in Netscape format (the 'Get cookies.txt LOCALLY' "
+                "extension's Export does this) and paste the whole file."
             ),
         )
-    save_cookies(content + "\n")
+    save_cookies(body.cookies)
     logger.info("YouTube cookies updated by admin %s", user.id)
     return cookies_status()
 
