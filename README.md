@@ -7,20 +7,21 @@
 [![Docker](https://img.shields.io/badge/docker-ready-2496ED.svg)](https://www.docker.com/)
 [![License: GPL v3](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
 
-NullFeed is a self-hosted YouTube media center that wraps **yt-dlp** with a polished, multi-user experience. The backend runs as a single Docker container and provides automated channel subscriptions, download management, media streaming with HTTP range requests, AI-powered recommendations via Claude, and real-time WebSocket updates -- all consumed by the NullFeed Flutter app on iOS and tvOS.
+NullFeed is a self-hosted YouTube media center that wraps **yt-dlp** with a polished, multi-user experience. The backend runs as a single Docker container and provides automated channel subscriptions, invisible background caching, instant reverse-proxied playback plus range-request media streaming, sponsor-segment detection, AI-powered recommendations via Claude, and real-time WebSocket updates -- consumed by the NullFeed apps (Flutter on iOS, native SwiftUI on tvOS).
 
 ---
 
 ## Features
 
-- **Instant Playback with Progressive Quality** -- Start watching immediately, even while a video is still downloading. The backend serves a low-quality stream on demand, then seamlessly upgrades to the full-quality version once the download completes -- no buffering, no interruption.
-- **Automated Channel Subscriptions** -- Subscribe to YouTube channels and automatically download new uploads on a configurable polling interval.
-- **Download Manager** -- Celery-based task queue with configurable concurrency, retry logic, and exponential backoff.
+- **Instant Playback** -- A not-yet-cached video plays immediately: the backend resolves and reverse-proxies a progressive source (`/instant-stream`), or serves a prewarmed 360p preview, while the full-quality version caches in the background for a seamless client-side upgrade -- no buffering, no interruption.
+- **Invisible Caching, Not a Collection** -- Following a channel quietly caches its new uploads in the background (configurable polling interval), and cold-pressed videos cache too. Cached content is reference-counted and bounded automatically -- LRU eviction for incidental cold-press cache, per-subscription retention for followed channels -- so there's no user-managed "download" collection to babysit.
+- **Download/Cache Manager** -- Celery-based task queue with configurable concurrency, retry logic, and exponential backoff.
 - **Media Streaming** -- Built-in static file server with HTTP range request support for native seeking and scrubbing.
 - **Multi-User Support** -- Independent profiles with per-user subscriptions, watch history, and playback positions.
 - **Smart Deduplication** -- One copy of each video on disk, reference-counted across all subscribing users.
 - **AI Recommendations** -- Claude-powered channel and video suggestions derived from each user's subscription graph via the Anthropic API.
-- **Real-Time Updates** -- WebSocket push for download progress, completion events, and new episode alerts.
+- **Sponsor-Skip** -- Detects sponsor/ad segments per video (SponsorBlock, with an AI-from-transcript fallback) and exposes them so clients skip them during playback.
+- **Real-Time Updates** -- WebSocket push for cache/download completion, new-episode alerts, sponsor-segment readiness, and recommendation refresh.
 - **Resume-Aware Feeds** -- Continue Watching, New Episodes, and Recently Added API endpoints for the home screen experience.
 - **Unraid-Native** -- Community Applications template for one-click installation on Unraid servers.
 - **Auto-Updating yt-dlp** -- Automatically updates yt-dlp on every container start to stay current with YouTube changes.
@@ -139,24 +140,42 @@ Full interactive documentation is available at `/docs` (Swagger UI) and `/redoc`
 |--------|------------------------------------|------------------------------------------|
 | GET    | `/api/channels`                    | List all known channels                  |
 | POST   | `/api/channels/subscribe`          | Subscribe current user to a channel      |
+| POST   | `/api/channels/subscribe-bulk`     | Subscribe to multiple channels at once   |
 | DELETE | `/api/channels/{id}/unsubscribe`   | Unsubscribe current user                 |
 | GET    | `/api/channels/{id}`               | Channel detail with video list           |
 | GET    | `/api/channels/{id}/videos`        | Paginated video list for a channel       |
+| POST   | `/api/channels/poll`               | Trigger an immediate poll of all your channels |
+| POST   | `/api/channels/{id}/poll`          | Trigger an immediate poll of one channel |
 
 ### Videos & Playback
-| Method | Endpoint                    | Description                                |
-|--------|-----------------------------|--------------------------------------------|
-| GET    | `/api/videos/{id}`          | Video metadata                             |
-| GET    | `/api/videos/{id}/stream`   | Stream video file (supports range requests)|
-| PUT    | `/api/videos/{id}/progress` | Update watch position                      |
-| DELETE | `/api/videos/{id}`          | Remove user's reference (ref-count check)  |
+| Method | Endpoint                          | Description                                |
+|--------|-----------------------------------|--------------------------------------------|
+| GET    | `/api/videos`                     | Search the user's episodes by title/channel |
+| GET    | `/api/videos/{id}`                | Video metadata                             |
+| POST   | `/api/videos/{id}/playback-ticket`| Mint a short-lived stream ticket           |
+| GET    | `/api/videos/{id}/instant-stream` | Reverse-proxied progressive source for immediate playback |
+| GET    | `/api/videos/{id}/preview-stream` | Serve a prewarmed 360p preview (if ready)  |
+| GET    | `/api/videos/{id}/stream`         | Stream the cached HQ file (supports range requests) |
+| POST   | `/api/videos/{id}/cache`          | Record a cache claim + start a background HQ fetch |
+| POST   | `/api/videos/prewarm`             | Batch pre-generate 360p previews for upcoming tiles |
+| GET    | `/api/videos/{id}/ad-segments`    | Detected sponsor/ad segments for client-side skipping |
+| PUT    | `/api/videos/{id}/progress`       | Update watch position                      |
+| DELETE | `/api/videos/{id}`                | Remove user's reference (ref-count check)  |
+
+### Watch-Later Queue
+| Method | Endpoint                  | Description                      |
+|--------|---------------------------|----------------------------------|
+| GET    | `/api/queue`              | Get the user's watch-later queue |
+| POST   | `/api/videos/{id}/queue`  | Add a video to watch-later       |
+| DELETE | `/api/videos/{id}/queue`  | Remove a video from watch-later  |
 
 ### Home Feed
 | Method | Endpoint                        | Description                               |
 |--------|---------------------------------|-------------------------------------------|
+| GET    | `/api/feed/home`                | All three sections below, in one call     |
 | GET    | `/api/feed/continue-watching`   | Videos with partial progress, by channel  |
-| GET    | `/api/feed/new-episodes`        | Channels with unwatched downloads         |
-| GET    | `/api/feed/recently-added`      | Chronological list of new downloads       |
+| GET    | `/api/feed/new-episodes`        | Newest unwatched episode per followed channel (cache-agnostic) |
+| GET    | `/api/feed/recently-added`      | Recent uploads across followed channels (cache-agnostic) |
 
 ### Recommendations
 | Method | Endpoint                       | Description                        |
@@ -168,7 +187,7 @@ Full interactive documentation is available at `/docs` (Swagger UI) and `/redoc`
 ### WebSocket
 | Endpoint                     | Description                                    |
 |------------------------------|------------------------------------------------|
-| `ws://{host}:{port}/ws/{user_id}` | Real-time events: download progress, completions, new episodes |
+| `ws://{host}:{port}/ws/{user_id}` | Real-time events: cache/download completion, new episodes, sponsor-segment readiness, recommendation refresh, watch-progress sync |
 
 ### Health
 | Method | Endpoint       | Description            |
