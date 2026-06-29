@@ -35,6 +35,12 @@ class Video(Base):
     metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     preview_file_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     preview_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # Detected sponsor/ad segments for client-side skipping (#88). JSON list of
+    # {start, end, category} in seconds. ad_segments_status: NULL = not checked,
+    # "PENDING" = detection enqueued, "READY" = checked (list may be empty when
+    # no ads were found).
+    ad_segments: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    ad_segments_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
     downloaded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # Liveness signal for an in-flight download: set when the row enters
     # DOWNLOADING and refreshed by the worker as yt-dlp produces output. The
