@@ -27,7 +27,7 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 from fastapi.responses import StreamingResponse
 
-from app.utils.ytdlp import cookie_args
+from app.utils.ytdlp import cookie_args, note_extraction_error
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +106,10 @@ def _ytdlp_get_url(youtube_video_id: str) -> str:
         raise InstantStreamError(f"Resolve timed out for {youtube_video_id}") from exc
 
     if result.returncode != 0:
-        tail = (result.stderr or result.stdout or "").strip().splitlines()[-1:]
+        stderr = result.stderr or result.stdout or ""
+        # Flag cookies as likely-expired if this was an age gate despite cookies.
+        note_extraction_error(stderr)
+        tail = stderr.strip().splitlines()[-1:]
         detail = tail[0] if tail else "unknown error"
         raise InstantStreamError(
             f"Resolve failed for {youtube_video_id}: {detail[:300]}"
