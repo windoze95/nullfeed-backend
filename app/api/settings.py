@@ -17,7 +17,9 @@ from app.utils.ytdlp import (
     cookies_status,
     has_cookie_rows,
     normalize_cookies,
+    note_extraction_error,
     save_cookies,
+    verify_cookies,
 )
 
 logger = logging.getLogger(__name__)
@@ -59,7 +61,13 @@ async def put_youtube_cookies(
             ),
         )
     save_cookies(body.cookies)
-    logger.info("YouTube cookies updated by admin %s", user.id)
+    # Verify they actually work so the UI reports "connected" only when true.
+    error = verify_cookies()
+    if error:
+        note_extraction_error(error)
+    logger.info(
+        "YouTube cookies updated by admin %s (working=%s)", user.id, error is None
+    )
     return cookies_status()
 
 
