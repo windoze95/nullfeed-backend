@@ -36,7 +36,9 @@ def test_save_status_and_clear(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "config_path", str(tmp_path))
     assert ytdlp.cookies_status()["configured"] is False
 
-    ytdlp.save_cookies("# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\tA\tB\n")
+    ytdlp.save_cookies(
+        "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\tA\tB\n"
+    )
     st = ytdlp.cookies_status()
     assert st["configured"] is True
     assert st["stale"] is False
