@@ -50,6 +50,25 @@ def publish_preview_ready(video_id: str, user_id: str) -> None:
     )
 
 
+def publish_ad_segments_ready(video_id: str, user_id: str) -> None:
+    """Publish ad_segments_ready event from the Celery worker (sync).
+
+    Emitted when sponsor/ad-segment detection finishes, so a player watching
+    this video (whose first request triggered detection) can fetch and apply the
+    segments mid-playback instead of only on the next open.
+    """
+    _get_sync_redis().publish(
+        PROGRESS_CHANNEL,
+        json.dumps(
+            {
+                "type": "ad_segments_ready",
+                "video_id": video_id,
+                "user_id": user_id,
+            }
+        ),
+    )
+
+
 def publish_download_complete(
     video_id: str,
     user_id: str,
@@ -133,10 +152,10 @@ async def _dispatch_event(payload: dict) -> None:
     user_id = payload["user_id"]
     msg_type = payload.get("type")
 
-    if msg_type == "preview_ready":
+    if msg_type in ("preview_ready", "ad_segments_ready"):
         await broadcast_to_user(
             user_id,
-            {"type": "preview_ready", "data": {"video_id": payload["video_id"]}},
+            {"type": msg_type, "data": {"video_id": payload["video_id"]}},
         )
     elif msg_type in ("download_complete", "new_episode"):
         # Both carry the same optional channel/title/youtube fields.

@@ -511,7 +511,7 @@ async def get_ad_segments(
     # double-enqueue) and kick off detection.
     video.ad_segments_status = "PENDING"
     await db.commit()
-    detect_ad_segments_task.delay(video_id)
+    detect_ad_segments_task.delay(video_id, user.id)
     return {"status": "PENDING", "segments": []}
 
 
