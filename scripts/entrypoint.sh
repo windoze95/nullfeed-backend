@@ -15,9 +15,13 @@ if [ "$(id -u)" = "0" ]; then
     chown -R "${PUID}:${PGID}" /data
 fi
 
-# ── Auto-update yt-dlp ─────────────────────────────────────────────────────
-echo "Updating yt-dlp..."
-pip install --quiet --upgrade yt-dlp 2>/dev/null || echo "yt-dlp update check failed (non-fatal)"
+# ── Auto-update yt-dlp + the bgutil po_token plugin ────────────────────────
+# YouTube's anti-bot/format enforcement changes constantly; pulling both latest
+# on every start keeps the extractor and its PO-token plugin matched and current
+# (the bundled provider is rebuilt from :latest each image build).
+echo "Updating yt-dlp + po_token plugin..."
+pip install --quiet --upgrade yt-dlp bgutil-ytdlp-pot-provider 2>/dev/null \
+    || echo "yt-dlp/plugin update check failed (non-fatal)"
 
 # ── Run Alembic migrations ─────────────────────────────────────────────────
 echo "Running database migrations..."
