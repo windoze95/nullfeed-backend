@@ -93,7 +93,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 app = FastAPI(
     title="NullFeed",
     description="Self-Hosted YouTube Media Center API",
-    version="1.0.0",
+    version="0.1.0",
     lifespan=lifespan,
 )
 
@@ -205,4 +205,4 @@ async def _http_exception_handler(
 
 @app.get("/")
 async def root() -> dict:
-    return {"service": "NullFeed", "version": "1.0.0", "docs": "/docs"}
+    return {"service": "NullFeed", "version": "0.1.0", "docs": "/docs"}
