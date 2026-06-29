@@ -14,7 +14,7 @@ from collections.abc import Callable
 import httpx
 
 from app.config import settings
-from app.utils.ytdlp import cookie_args
+from app.utils.ytdlp import cookie_args, player_client_args
 
 logger = logging.getLogger(__name__)
 
@@ -170,6 +170,9 @@ def download_video(
     cmd = [
         "yt-dlp",
         *cookie_args(),
+        # Default clients (tv/web_creator) get downgraded to storyboards-only for
+        # age-restricted videos; the web/android clients return the real formats.
+        *player_client_args(),
         "--format",
         format_str,
         "--merge-output-format",
@@ -337,6 +340,9 @@ def download_preview(
     cmd = [
         "yt-dlp",
         *cookie_args(),
+        # Default clients (tv/web_creator) get downgraded to storyboards-only for
+        # age-restricted videos; the web/android clients return the real formats.
+        *player_client_args(),
         "--format",
         format_str,
         # Only takes effect when the adaptive fallback is selected (a merge);
@@ -386,6 +392,7 @@ def download_preview(
                     [
                         "yt-dlp",
                         *cookie_args(),
+                        *player_client_args(),
                         "-F",
                         "--no-warnings",
                         "--no-playlist",
