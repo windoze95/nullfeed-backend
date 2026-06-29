@@ -40,6 +40,16 @@ class Settings(BaseSettings):
     # Reclaiming disk is not urgent, so a few hours' latency is plenty.
     retention_interval_hours: int = 6
 
+    # Play cache (downloads-as-cache, #86)
+    # A cold press on a not-yet-downloaded video records an evictable CACHE ref
+    # (distinct from the user's library) and may back it with an HQ download. The
+    # cache reaper keeps the most-recently-watched cache_retention_count videos
+    # per user — watch-later-queued videos are pinned and never evicted — and
+    # reclaims the rest. Runs every cache_retention_interval_hours. A negative
+    # count disables eviction; 0 keeps no cache.
+    cache_retention_count: int = 200
+    cache_retention_interval_hours: int = 6
+
     # Auth sessions
     # A session is rejected once it is older than the absolute TTL (since
     # creation) or has been idle longer than the idle TTL (since last activity).

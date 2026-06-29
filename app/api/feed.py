@@ -7,7 +7,7 @@ from app.database import get_db
 from app.models.channel import Channel
 from app.models.subscription import UserSubscription
 from app.models.user import User
-from app.models.user_video_ref import UserVideoRef
+from app.models.user_video_ref import REF_KIND_LIBRARY, UserVideoRef
 from app.models.video import Video
 from app.schemas.channel import ChannelOut
 from app.schemas.feed import FeedItem, HomeFeed
@@ -110,6 +110,7 @@ async def _new_episodes_items(
         .where(
             UserVideoRef.user_id == user.id,
             UserVideoRef.removed_at.is_(None),
+            UserVideoRef.kind == REF_KIND_LIBRARY,
             UserVideoRef.is_watched == False,  # noqa: E712
             Video.channel_id.in_(subscribed_ids),
             Video.status == "COMPLETE",
@@ -150,6 +151,7 @@ async def _recently_added_items(
         .where(
             UserVideoRef.user_id == user.id,
             UserVideoRef.removed_at.is_(None),
+            UserVideoRef.kind == REF_KIND_LIBRARY,
             Video.status == "COMPLETE",
         )
         .order_by(

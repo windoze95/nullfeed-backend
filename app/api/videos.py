@@ -15,7 +15,11 @@ from app.config import settings
 from app.database import get_db
 from app.models.channel import Channel
 from app.models.user import User
-from app.models.user_video_ref import UserVideoRef
+from app.models.user_video_ref import (
+    REF_KIND_CACHE,
+    REF_KIND_LIBRARY,
+    UserVideoRef,
+)
 from app.models.video import Video
 from app.schemas.ticket import AccessTicket
 from app.schemas.video import (
@@ -49,22 +53,41 @@ router = APIRouter(prefix="/api/videos", tags=["videos"])
 logger = logging.getLogger(__name__)
 
 
-async def _ensure_active_ref(db: AsyncSession, user_id: str, video_id: str) -> None:
+async def _ensure_active_ref(
+    db: AsyncSession,
+    user_id: str,
+    video_id: str,
+    kind: str = REF_KIND_LIBRARY,
+) -> None:
     """Register (or reactivate) the caller's claim on a video.
 
     The set of active (``removed_at IS NULL``) UserVideoRefs is the download's
     reference count, so any endpoint that expresses "I want this video" must
     leave the caller holding an active ref. Idempotent: creates the ref if
-    missing, clears ``removed_at`` if it was soft-deleted, and leaves an
-    already-active ref untouched.
+    missing and clears ``removed_at`` if it was soft-deleted.
+
+    ``kind`` records *why* the user holds it. A LIBRARY claim (explicit download)
+    **promotes** an existing CACHE ref to LIBRARY, so a video you cold-watched
+    and then chose to download joins your collection. A CACHE claim (implicit,
+    from playing) never *downgrades* an existing LIBRARY ref — it only sets the
+    kind when creating the row.
     """
     now = utcnow_naive()
+    set_: dict = {"removed_at": None}
+    if kind == REF_KIND_LIBRARY:
+        set_["kind"] = REF_KIND_LIBRARY
     stmt = (
         sqlite_insert(UserVideoRef)
-        .values(user_id=user_id, video_id=video_id, added_at=now, removed_at=None)
+        .values(
+            user_id=user_id,
+            video_id=video_id,
+            added_at=now,
+            removed_at=None,
+            kind=kind,
+        )
         .on_conflict_do_update(
             index_elements=["user_id", "video_id"],
-            set_={"removed_at": None},
+            set_=set_,
         )
     )
     await db.execute(stmt)
@@ -90,9 +113,12 @@ async def search_videos(
     """
     sort_key = func.coalesce(Video.uploaded_at, Video.created_at)
 
+    # The library grid is the user's *collection* — LIBRARY refs only. Videos
+    # held merely as a play cache never appear here.
     filters = [
         UserVideoRef.user_id == user.id,
         UserVideoRef.removed_at.is_(None),
+        UserVideoRef.kind == REF_KIND_LIBRARY,
     ]
     if q and q.strip():
         pattern = f"%{escape_like(q.strip())}%"
@@ -187,6 +213,10 @@ async def get_active_downloads(
         .where(
             UserVideoRef.user_id == user.id,
             UserVideoRef.removed_at.is_(None),
+            # Cache downloads are silent — the Downloads tab tracks the user's
+            # collection (LIBRARY) only; a cold-press's background HQ fetch shows
+            # up in the player (preview->HQ swap), not here.
+            UserVideoRef.kind == REF_KIND_LIBRARY,
             or_(
                 Video.status.in_(["PENDING", "DOWNLOADING"]),
                 # Include recently completed videos for the "done" transition
@@ -293,6 +323,41 @@ async def trigger_download(
     download_video_task.delay(video_id, user.id, quality=quality)
 
     return {"detail": "Download enqueued", "video_id": video_id}
+
+
+@router.post("/{video_id}/cache")
+async def cache_video(
+    video_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Cache a video the user is about to watch (#86).
+
+    Called when a client starts instant playback of a not-yet-downloaded video:
+    it records an evictable CACHE claim and, if nothing is downloading it yet,
+    enqueues the HQ download so the player can swap preview -> HQ. Idempotent and
+    best-effort — unlike ``/download`` it never 409s, because caching is implicit
+    (the user pressed play, not "download"). A CACHE claim never downgrades an
+    existing LIBRARY ref, and the download is hidden from the Downloads tab.
+    """
+    result = await db.execute(select(Video).where(Video.id == video_id))
+    video = result.scalar_one_or_none()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    await _ensure_active_ref(db, user.id, video_id, kind=REF_KIND_CACHE)
+
+    # Already downloaded or in flight (incl. a teardown settling): the player
+    # gets HQ from the existing file/download, so there is nothing to enqueue.
+    if video.status in ("PENDING", "DOWNLOADING", "COMPLETE", "CANCELLING"):
+        return {"status": video.status, "video_id": video_id}
+
+    # CATALOGED or FAILED: kick off the HQ download that backs the cache.
+    video.status = "PENDING"
+    await db.commit()
+    download_video_task.delay(video_id, user.id)
+
+    return {"status": "PENDING", "video_id": video_id}
 
 
 @router.post("/{video_id}/cancel")
@@ -568,6 +633,11 @@ async def update_progress(
         added_at=now,
         removed_at=None,
         last_watched_at=now,
+        # Watching a video the user hasn't downloaded creates an evictable CACHE
+        # ref, never a library entry — playing must not silently build a
+        # collection. The conflict path below leaves ``kind`` untouched, so an
+        # existing LIBRARY ref is never downgraded by watching it.
+        kind=REF_KIND_CACHE,
     )
     # UPSERT: update progress and reactivate soft-deleted refs in one statement.
     stmt = stmt.on_conflict_do_update(

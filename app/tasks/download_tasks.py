@@ -27,6 +27,7 @@ from app.services.download_manager import (
     download_preview,
     download_video,
 )
+from app.services.cache_retention import enforce_cache_retention
 from app.services.download_reaper import reap_stuck_downloads
 from app.services.retention import enforce_retention
 from app.services.session_reaper import reap_expired_sessions
@@ -529,6 +530,29 @@ def enforce_retention_task(self) -> dict:
         return {"status": "ok", **result}
     except Exception:
         logger.exception("Error in enforce_retention_task")
+        return {"status": "error"}
+    finally:
+        db.close()
+
+
+@celery_app.task(
+    name="app.tasks.download_tasks.enforce_video_cache_task",
+    bind=True,
+    max_retries=0,
+)
+def enforce_video_cache_task(self) -> dict:
+    """Periodic task: evict stale play-cache refs (LRU) per user.
+
+    Soft-removes each user's CACHE refs beyond the most-recently-watched budget
+    (watch-later-queued videos pinned), then reuses the orphan cleanup to reclaim
+    any file no remaining active ref still wants.
+    """
+    db = _get_sync_db()
+    try:
+        result = enforce_cache_retention(db)
+        return {"status": "ok", **result}
+    except Exception:
+        logger.exception("Error in enforce_video_cache_task")
         return {"status": "error"}
     finally:
         db.close()
