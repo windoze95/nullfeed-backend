@@ -24,6 +24,7 @@ from app.models.video import Video
 from app.schemas.ticket import AccessTicket
 from app.schemas.video import (
     DownloadRequest,
+    PrewarmRequest,
     VideoDetail,
     VideoOut,
     VideoProgress,
@@ -51,6 +52,10 @@ from app.utils.time import utcnow_naive
 
 router = APIRouter(prefix="/api/videos", tags=["videos"])
 logger = logging.getLogger(__name__)
+
+# Upper bound on how many previews one /prewarm call may enqueue, so a client
+# showing a long list can't kick off an unbounded number of preview downloads.
+PREWARM_MAX_PER_CALL = 16
 
 
 async def _ensure_active_ref(
@@ -244,6 +249,49 @@ async def get_active_downloads(
         )
         for v in videos
     ]
+
+
+@router.post("/prewarm")
+async def prewarm_previews(
+    body: PrewarmRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Pre-generate 360p previews for videos the user is likely to play next (#87).
+
+    Clients call this with the ids they're showing (the focused tile, the
+    watch-later queue, the top of the feed) so a later tap lands on the
+    ready-preview fast path instead of the cold instant-stream path. Bounded and
+    idempotent: only not-downloaded videos without a preview are enqueued, capped
+    per call, and a preview already downloading/ready is left alone. Speculative,
+    so it records no ref (it just produces a shared preview file).
+    """
+    # Dedupe, then cap so a client can't enqueue an unbounded batch.
+    video_ids = list(dict.fromkeys(body.video_ids))[:PREWARM_MAX_PER_CALL]
+    if not video_ids:
+        return {"enqueued": []}
+
+    result = await db.execute(
+        select(Video).where(
+            Video.id.in_(video_ids),
+            Video.status != "COMPLETE",
+            Video.preview_status.is_(None),
+        )
+    )
+    eligible = result.scalars().all()
+
+    # Mark DOWNLOADING up front so a repeat prewarm (e.g. a feed refresh) skips a
+    # video already being prepared; the task sets it again and resets to NULL on
+    # failure, so a failed prewarm is retryable.
+    enqueued = [video.id for video in eligible]
+    for video in eligible:
+        video.preview_status = "DOWNLOADING"
+    if enqueued:
+        await db.commit()
+        for video_id in enqueued:
+            download_preview_task.delay(video_id, user.id)
+
+    return {"enqueued": enqueued}
 
 
 @router.get("/{video_id}", response_model=VideoDetail)

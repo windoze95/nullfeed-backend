@@ -38,6 +38,13 @@ class DownloadRequest(BaseModel):
     quality: Literal["720p", "1080p", "4k", "best"] | None = None
 
 
+class PrewarmRequest(BaseModel):
+    """Ids of videos the client expects the user to play soon, so the backend can
+    pre-generate their previews. Bounded server-side; extra ids are ignored."""
+
+    video_ids: list[str] = Field(default_factory=list)
+
+
 class VideoPagination(BaseModel):
     items: list[VideoOut]
     total: int
