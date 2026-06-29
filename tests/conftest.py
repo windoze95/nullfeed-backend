@@ -26,6 +26,7 @@ from httpx import ASGITransport, AsyncClient
 
 import app.api.auth as auth_api
 import app.api.websocket as websocket_api
+import app.services.instant_stream as instant_stream
 import app.services.push_gateway as push_gateway
 import app.services.youtube_import as youtube_import
 import app.utils.websub as websub_util
@@ -41,6 +42,7 @@ def _reset_in_memory_state():
     auth_api._pin_throttle.clear()
     youtube_import._resolve_cache.clear()
     youtube_import._suggestions_cache.clear()
+    instant_stream._resolve_cache.clear()
     websocket_api._connections.clear()
     push_gateway._reset_cache()
     websub_util._reset_cache()
