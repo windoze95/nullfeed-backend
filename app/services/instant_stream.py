@@ -27,20 +27,14 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 from fastapi.responses import StreamingResponse
 
-from app.utils.ytdlp import cookie_args, note_extraction_error
+from app.utils.ytdlp import (
+    PROGRESSIVE_FORMAT,
+    cookie_args,
+    note_extraction_error,
+    player_client_args,
+)
 
 logger = logging.getLogger(__name__)
-
-# Progressive (muxed) selectors only — a single file AVPlayer / video_player can
-# play without a merge step. Prefer H.264 + AAC for native decode, then any
-# progressive mp4, then itag 18 (the canonical 360p muxed format), then any
-# format that carries both audio and video.
-_PROGRESSIVE_FORMAT = (
-    "best[vcodec^=avc1][acodec^=mp4a]"
-    "/best[ext=mp4][acodec!=none][vcodec!=none]"
-    "/18"
-    "/best[acodec!=none][vcodec!=none]"
-)
 
 # yt-dlp resolve timeout. Resolve is a metadata/extraction round-trip, not a
 # download, so it should be quick; keep it tight so a wedged extract surfaces as
@@ -91,8 +85,9 @@ def _ytdlp_get_url(youtube_video_id: str) -> str:
     cmd = [
         "yt-dlp",
         *cookie_args(),
+        *player_client_args(),
         "--format",
-        _PROGRESSIVE_FORMAT,
+        PROGRESSIVE_FORMAT,
         "--get-url",
         "--no-playlist",
         "--no-warnings",

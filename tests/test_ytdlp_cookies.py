@@ -143,7 +143,7 @@ def test_verify_cookies_probes_age_restricted(monkeypatch, tmp_path):
     msg = ytdlp.verify_cookies()
     assert msg is not None and "Netscape" in msg
 
-    # Age probe unavailable but the normal session is fine → not flagged.
+    # Age probe unavailable (probe video removed) but normal session fine → ok.
     monkeypatch.setattr(
         ytdlp,
         "_probe_error",
@@ -152,6 +152,19 @@ def test_verify_cookies_probes_age_restricted(monkeypatch, tmp_path):
         ),
     )
     assert ytdlp.verify_cookies() is None
+
+    # Age unlocked but no progressive stream (SABR) → don't claim connected.
+    monkeypatch.setattr(
+        ytdlp,
+        "_probe_error",
+        lambda vid: (
+            "ERROR: Requested format is not available"
+            if vid == ytdlp._AGE_PROBE_VIDEO_ID
+            else None
+        ),
+    )
+    msg = ytdlp.verify_cookies()
+    assert msg is not None and "progressive" in msg
 
 
 def test_resolve_command_includes_cookies(monkeypatch):
@@ -175,3 +188,5 @@ def test_resolve_command_includes_cookies(monkeypatch):
 
     assert url == "https://upstream.test/v.mp4"
     assert captured["cmd"][:3] == ["yt-dlp", "--cookies", "/c.txt"]
+    # Forces a progressive-capable player client (cookie-auth web is SABR-only).
+    assert "youtube:player_client=android,web" in captured["cmd"]
