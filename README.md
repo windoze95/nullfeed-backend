@@ -106,6 +106,7 @@ NullFeed is a self-hosted YouTube media center that wraps **yt-dlp** with a poli
 | `ANTHROPIC_API_KEY`      | _(none)_  | Anthropic API key for AI recommendations (Discover tab)  |
 | `DOWNLOAD_CONCURRENCY`   | `2`       | Max simultaneous yt-dlp downloads                        |
 | `MEDIA_QUALITY`          | `1080p`   | Default download quality (`720p` / `1080p` / `4k` / `best`) |
+| `YOUTUBE_COOKIES_FILE`   | _(auto)_  | Path to a `cookies.txt` so yt-dlp can play **age-restricted / members-only** videos. Defaults to `<config>/cookies.txt` if present. See [Age-restricted videos](#age-restricted-videos). |
 | `CHECK_INTERVAL_MINUTES` | `60`      | How often to poll subscribed channels for new uploads    |
 | `PUID`                   | `1000`    | User ID for file permissions (Unraid standard)           |
 | `PGID`                   | `1000`    | Group ID for file permissions (Unraid standard)          |
@@ -122,6 +123,27 @@ NullFeed is a self-hosted YouTube media center that wraps **yt-dlp** with a poli
 | `/data/db`         | SQLite database + migrations     | `/mnt/user/appdata/nullfeed/db`         |
 | `/data/config`     | App configuration, API keys      | `/mnt/user/appdata/nullfeed/config`     |
 | `/data/thumbnails` | Cached channel art and thumbnails| `/mnt/user/appdata/nullfeed/thumbs`     |
+
+---
+
+## Age-restricted videos
+
+YouTube blocks extraction of **age-restricted and members-only** videos for
+anonymous requests ("Sign in to confirm your age"). Since the backend uses
+`yt-dlp` for streaming, previews, and downloads, those videos won't play unless
+yt-dlp is authenticated with your YouTube cookies.
+
+To enable them:
+
+1. Export a `cookies.txt` from a browser **logged in to YouTube** (e.g. the
+   "Get cookies.txt LOCALLY" extension, in Netscape format). Use a throwaway
+   account if you'd rather not use your main one.
+2. Drop it at **`/data/config/cookies.txt`** (auto-detected), or set
+   `YOUTUBE_COOKIES_FILE` to a custom path.
+3. Restart the container.
+
+Notes: cookies expire and YouTube rotates them, so you may need to refresh the
+file occasionally; yt-dlp updates the file in place, so it must be writable.
 
 ---
 
