@@ -127,6 +127,15 @@ app.include_router(push.router)
 app.include_router(websub.router)
 
 
+# Serve the Flutter web app, baked into the image at /app/web by the Dockerfile's
+# `web` stage. Mounted last (after the API/WS routers, the thumbnail mount, and
+# the auto-docs) so those take precedence; the catch-all only handles the SPA
+# shell + its assets. Absent in plain backend/dev builds, so guard on the dir.
+_web_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "web")
+if os.path.isdir(_web_dir):
+    app.mount("/", StaticFiles(directory=_web_dir, html=True), name="web")
+
+
 # ---------------------------------------------------------------------------
 # Normalized error envelope (#3)
 #

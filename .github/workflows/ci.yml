@@ -81,6 +81,10 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          # Backend-only target: per-PR CI skips the (slow) Flutter web build.
+          # The web bundle is validated by the flutter repo's own Build Web CI;
+          # the full image with web is assembled at release (docker-publish).
+          target: runtime
           push: false
           cache-from: type=gha
           cache-to: type=gha,mode=max

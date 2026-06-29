@@ -17,6 +17,7 @@ NullFeed is a self-hosted YouTube media center that wraps **yt-dlp** with a poli
 - **Invisible Caching, Not a Collection** -- Following a channel quietly caches its new uploads in the background (configurable polling interval), and cold-pressed videos cache too. Cached content is reference-counted and bounded automatically -- LRU eviction for incidental cold-press cache, per-subscription retention for followed channels -- so there's no user-managed "download" collection to babysit.
 - **Download/Cache Manager** -- Celery-based task queue with configurable concurrency, retry logic, and exponential backoff.
 - **Media Streaming** -- Built-in static file server with HTTP range request support for native seeking and scrubbing.
+- **Built-in Web App** -- The published Docker image bakes in the Flutter web client and serves it at `/`, so a single URL gives you both the app and the API (`/docs`) -- no separate web host needed.
 - **Multi-User Support** -- Independent profiles with per-user subscriptions, watch history, and playback positions.
 - **Smart Deduplication** -- One copy of each video on disk, reference-counted across all subscribing users.
 - **AI Recommendations** -- Claude-powered channel and video suggestions derived from each user's subscription graph via the Anthropic API.
@@ -91,9 +92,9 @@ NullFeed is a self-hosted YouTube media center that wraps **yt-dlp** with a poli
    curl http://localhost:8484/api/health
    ```
 
-5. **Explore the API docs:**
+5. **Open the app / API docs:**
 
-   Open [http://localhost:8484/docs](http://localhost:8484/docs) in your browser for the interactive Swagger UI.
+   The published image serves the **web app** at [http://localhost:8484/](http://localhost:8484/), and the interactive API docs (Swagger UI) at [http://localhost:8484/docs](http://localhost:8484/docs).
 
 ---
 
