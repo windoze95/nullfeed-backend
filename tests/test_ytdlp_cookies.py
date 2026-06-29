@@ -153,7 +153,8 @@ def test_verify_cookies_probes_age_restricted(monkeypatch, tmp_path):
     )
     assert ytdlp.verify_cookies() is None
 
-    # Age unlocked but no progressive stream (SABR) → don't claim connected.
+    # A format/playback error (not auth) must NOT mark valid cookies broken —
+    # whether a progressive stream exists is a playback concern, not the cookies'.
     monkeypatch.setattr(
         ytdlp,
         "_probe_error",
@@ -163,8 +164,7 @@ def test_verify_cookies_probes_age_restricted(monkeypatch, tmp_path):
             else None
         ),
     )
-    msg = ytdlp.verify_cookies()
-    assert msg is not None and "progressive" in msg
+    assert ytdlp.verify_cookies() is None
 
 
 def test_resolve_command_includes_cookies(monkeypatch):
