@@ -31,6 +31,29 @@ _NETSCAPE_HEADERS = ("# Netscape HTTP Cookie File", "# HTTP Cookie File")
 _AGE_PROBE_VIDEO_ID = "HtVdAasjOgU"  # stable age-restricted (yt-dlp test video)
 _PROBE_VIDEO_ID = "dQw4w9WgXcQ"  # stable, public, non-restricted
 
+# Progressive (muxed, single-file) format selector — what the instant-stream
+# proxy needs (a file the player can play with no merge step). Prefer H.264+AAC,
+# then any progressive mp4, then itag 18 (canonical 360p muxed), then any muxed.
+# Shared with the cookie probe so "connected" reflects the real resolve.
+PROGRESSIVE_FORMAT = (
+    "best[vcodec^=avc1][acodec^=mp4a]"
+    "/best[ext=mp4][acodec!=none][vcodec!=none]"
+    "/18"
+    "/best[acodec!=none][vcodec!=none]"
+)
+
+# Force progressive-capable YouTube player clients. A cookie-authenticated `web`
+# session gets SABR-only formats from YouTube (no progressive itag), so muxed
+# formats vanish and every resolve dies "Requested format is not available". The
+# `android` client still serves itag 18; `web` is kept for age-gate auth.
+_PLAYER_CLIENTS = "android,web"
+
+
+def player_client_args() -> list[str]:
+    """``--extractor-args`` forcing progressive-capable YouTube player clients."""
+    return ["--extractor-args", f"youtube:player_client={_PLAYER_CLIENTS}"]
+
+
 # Substrings in a yt-dlp error that mean "the cookies aren't working" — surfaced
 # to the admin so they know to refresh/fix them rather than guessing.
 _COOKIE_TROUBLE_MARKERS = (
@@ -107,8 +130,10 @@ def normalize_cookies(content: str) -> str:
 
 
 def _probe_error(video_id: str) -> str | None:
-    """``yt-dlp --simulate`` with the saved cookies; the last error line, or None
-    on success / no cookies / a slow probe."""
+    """Resolve a progressive URL for ``video_id`` with the saved cookies exactly
+    as playback does; the last error line, or None on success / no cookies / a
+    slow probe. Using the real resolve (not ``--simulate``) means a green check
+    reflects what the player will actually get."""
     path = cookies_path()
     if path is None:
         return None
@@ -116,7 +141,10 @@ def _probe_error(video_id: str) -> str | None:
         "yt-dlp",
         "--cookies",
         path,
-        "--simulate",
+        *player_client_args(),
+        "--format",
+        PROGRESSIVE_FORMAT,
+        "--get-url",
         "--no-warnings",
         "--no-playlist",
         f"https://www.youtube.com/watch?v={video_id}",
@@ -157,7 +185,15 @@ def verify_cookies() -> str | None:
         )
     if any(m in low for m in _COOKIE_TROUBLE_MARKERS):
         return age_err
-    # Age probe failed for an unrelated reason; confirm the session at least.
+    if "requested format is not available" in low:
+        # Age unlocked but no progressive/muxed stream came back — exactly the
+        # SABR failure the player can't use. Don't claim "connected".
+        return (
+            "Cookies load, but no playable (progressive) stream was available "
+            "for an age-restricted video — age-restricted playback may not work."
+        )
+    # Age probe video itself unavailable (removed/private/geo); fall back to a
+    # normal video to at least catch a broken session.
     normal_err = _probe_error(_PROBE_VIDEO_ID)
     if normal_err and any(m in normal_err.lower() for m in _COOKIE_TROUBLE_MARKERS):
         return normal_err
