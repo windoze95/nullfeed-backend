@@ -5,6 +5,7 @@ import shutil
 import signal
 import subprocess
 import json
+import tempfile
 import threading
 import time
 import xml.etree.ElementTree as ET
@@ -360,6 +361,58 @@ def download_preview(
         "file_path": relative_path,
         "file_size_bytes": file_size,
     }
+
+
+def fetch_transcript(youtube_video_id: str) -> list[dict] | None:
+    """Fetch the timestamped English transcript (auto-captions) via yt-dlp.
+
+    Returns a list of ``{"start": float_seconds, "text": str}`` cues, or None if
+    no captions are available or extraction fails. Used as input to AI ad-segment
+    detection — it downloads only the subtitle track (``--skip-download``), parsed
+    from yt-dlp's json3 format.
+    """
+    url = f"https://www.youtube.com/watch?v={youtube_video_id}"
+    with tempfile.TemporaryDirectory() as tmp:
+        output_template = os.path.join(tmp, "%(id)s.%(ext)s")
+        cmd = [
+            "yt-dlp",
+            "--skip-download",
+            "--write-auto-subs",
+            "--write-subs",
+            "--sub-langs",
+            "en.*",
+            "--sub-format",
+            "json3",
+            "--no-playlist",
+            "--output",
+            output_template,
+            url,
+        ]
+        try:
+            subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        except subprocess.TimeoutExpired:
+            logger.warning("Transcript fetch timed out for %s", youtube_video_id)
+            return None
+
+        json3_files = [f for f in os.listdir(tmp) if f.endswith(".json3")]
+        if not json3_files:
+            return None
+        try:
+            with open(os.path.join(tmp, json3_files[0])) as fh:
+                data = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    cues: list[dict] = []
+    for event in data.get("events", []):
+        segs = event.get("segs")
+        start_ms = event.get("tStartMs")
+        if not segs or start_ms is None:
+            continue
+        text = "".join(seg.get("utf8", "") for seg in segs).strip()
+        if text:
+            cues.append({"start": round(start_ms / 1000.0, 2), "text": text})
+    return cues or None
 
 
 def _cleanup_partial_files(output_dir: str, youtube_video_id: str) -> None:

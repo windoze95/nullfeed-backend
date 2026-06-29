@@ -27,6 +27,7 @@ from app.services.download_manager import (
     download_preview,
     download_video,
 )
+from app.services.ad_segments import resolve_ad_segments
 from app.services.cache_retention import enforce_cache_retention
 from app.services.download_reaper import reap_stuck_downloads
 from app.services.retention import enforce_retention
@@ -481,6 +482,39 @@ def download_preview_task(self, video_id: str, user_id: str) -> dict:
         except Exception:
             pass
         raise exc
+    finally:
+        db.close()
+
+
+@celery_app.task(
+    name="app.tasks.download_tasks.detect_ad_segments_task",
+    bind=True,
+    max_retries=0,
+)
+def detect_ad_segments_task(self, video_id: str) -> dict:
+    """Detect sponsor/ad segments (SponsorBlock + AI fallback) and store them for
+    client-side skipping. ad_segments_status -> READY (list may be empty); reset
+    to NULL on failure so a later request can retry."""
+    db = _get_sync_db()
+    try:
+        video = db.get(Video, video_id)
+        if not video:
+            return {"status": "error", "reason": "not_found"}
+        segments = resolve_ad_segments(video.youtube_video_id)
+        video.ad_segments = segments
+        video.ad_segments_status = "READY"
+        db.commit()
+        return {"status": "ok", "count": len(segments)}
+    except Exception:
+        logger.exception("Ad-segment detection failed for video %s", video_id)
+        try:
+            video = db.get(Video, video_id)
+            if video:
+                video.ad_segments_status = None  # allow a retry
+                db.commit()
+        except Exception:
+            pass
+        return {"status": "error"}
     finally:
         db.close()
 

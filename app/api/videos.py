@@ -38,7 +38,11 @@ from app.services.instant_stream import (
 from app.services.media_server import build_media_response
 from app.services.progress_broadcaster import publish_progress_updated
 from app.services.storage import check_and_delete_orphan
-from app.tasks.download_tasks import download_preview_task, download_video_task
+from app.tasks.download_tasks import (
+    detect_ad_segments_task,
+    download_preview_task,
+    download_video_task,
+)
 from app.utils.pagination import decode_cursor, encode_cursor
 from app.utils.search import escape_like
 from app.utils.tickets import (
@@ -478,6 +482,37 @@ async def cancel_download(
     await db.commit()
 
     return {"detail": "Download cancelled", "video_id": video_id, "stopped": True}
+
+
+@router.get("/{video_id}/ad-segments")
+async def get_ad_segments(
+    video_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Return detected sponsor/ad segments for client-side skipping (#88).
+
+    Lazily triggers detection (SponsorBlock first, AI-from-transcript fallback)
+    on first request and returns PENDING; once ready, returns the cached segments
+    (a possibly-empty list of ``{start, end, category}`` in seconds). Clients seek
+    past these during playback.
+    """
+    result = await db.execute(select(Video).where(Video.id == video_id))
+    video = result.scalar_one_or_none()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    if video.ad_segments_status == "READY":
+        return {"status": "READY", "segments": video.ad_segments or []}
+    if video.ad_segments_status == "PENDING":
+        return {"status": "PENDING", "segments": []}
+
+    # Not yet checked — mark PENDING up front (so concurrent requests don't
+    # double-enqueue) and kick off detection.
+    video.ad_segments_status = "PENDING"
+    await db.commit()
+    detect_ad_segments_task.delay(video_id)
+    return {"status": "PENDING", "segments": []}
 
 
 @router.post("/{video_id}/preview")
