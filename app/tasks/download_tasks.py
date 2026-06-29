@@ -35,6 +35,7 @@ from app.services.session_reaper import reap_expired_sessions
 from app.services.websub import sync_subscriptions
 from app.utils.time import utcnow_naive
 from app.services.progress_broadcaster import (
+    publish_ad_segments_ready,
     publish_download_complete,
     publish_download_progress,
     publish_preview_ready,
@@ -491,10 +492,11 @@ def download_preview_task(self, video_id: str, user_id: str) -> dict:
     bind=True,
     max_retries=0,
 )
-def detect_ad_segments_task(self, video_id: str) -> dict:
+def detect_ad_segments_task(self, video_id: str, user_id: str) -> dict:
     """Detect sponsor/ad segments (SponsorBlock + AI fallback) and store them for
     client-side skipping. ad_segments_status -> READY (list may be empty); reset
-    to NULL on failure so a later request can retry."""
+    to NULL on failure so a later request can retry. Publishes ad_segments_ready
+    so a player already watching this video applies the segments mid-playback."""
     db = _get_sync_db()
     try:
         video = db.get(Video, video_id)
@@ -504,6 +506,7 @@ def detect_ad_segments_task(self, video_id: str) -> dict:
         video.ad_segments = segments
         video.ad_segments_status = "READY"
         db.commit()
+        publish_ad_segments_ready(video_id, user_id)
         return {"status": "ok", "count": len(segments)}
     except Exception:
         logger.exception("Ad-segment detection failed for video %s", video_id)

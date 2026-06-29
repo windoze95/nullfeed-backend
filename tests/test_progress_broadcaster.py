@@ -66,6 +66,16 @@ async def test_dispatch_progress_updated(sent):
     )
 
 
+async def test_dispatch_ad_segments_ready(sent):
+    await _dispatch_event(
+        {"type": "ad_segments_ready", "user_id": "u1", "video_id": "v1"}
+    )
+    sent.assert_awaited_once_with(
+        "u1",
+        {"type": "ad_segments_ready", "data": {"video_id": "v1"}},
+    )
+
+
 async def test_dispatch_download_complete_still_works(sent):
     await _dispatch_event(
         {

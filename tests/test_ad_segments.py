@@ -138,7 +138,7 @@ async def test_ad_segments_first_call_enqueues_pending(client, make_user, detect
     resp = await client.get(f"/api/videos/{video.id}/ad-segments", headers=headers)
     assert resp.status_code == 200
     assert resp.json() == {"status": "PENDING", "segments": []}
-    detect_delay.assert_called_once_with(video.id)
+    detect_delay.assert_called_once_with(video.id, user["id"])
 
     async with async_session_factory() as db:
         v = (await db.execute(select(Video).where(Video.id == video.id))).scalar_one()
