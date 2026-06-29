@@ -130,10 +130,16 @@ def normalize_cookies(content: str) -> str:
 
 
 def _probe_error(video_id: str) -> str | None:
-    """Resolve a progressive URL for ``video_id`` with the saved cookies exactly
-    as playback does; the last error line, or None on success / no cookies / a
-    slow probe. Using the real resolve (not ``--simulate``) means a green check
-    reflects what the player will actually get."""
+    """``yt-dlp --simulate`` with the saved cookies — checks the cookies
+    *authenticate* (pass the age gate). The last error line, or None on success /
+    no cookies / a slow probe.
+
+    Deliberately does NOT force the progressive player client or a muxed format:
+    whether a progressive stream exists is a playback concern (YouTube serves the
+    cookie-auth web client SABR-only, and the android client that has progressive
+    age-gates), not a cookie-validity one — so we must not mark valid cookies
+    "broken" just because an age-restricted video is SABR-only.
+    """
     path = cookies_path()
     if path is None:
         return None
@@ -141,10 +147,7 @@ def _probe_error(video_id: str) -> str | None:
         "yt-dlp",
         "--cookies",
         path,
-        *player_client_args(),
-        "--format",
-        PROGRESSIVE_FORMAT,
-        "--get-url",
+        "--simulate",
         "--no-warnings",
         "--no-playlist",
         f"https://www.youtube.com/watch?v={video_id}",
@@ -185,13 +188,6 @@ def verify_cookies() -> str | None:
         )
     if any(m in low for m in _COOKIE_TROUBLE_MARKERS):
         return age_err
-    if "requested format is not available" in low:
-        # Age unlocked but no progressive/muxed stream came back — exactly the
-        # SABR failure the player can't use. Don't claim "connected".
-        return (
-            "Cookies load, but no playable (progressive) stream was available "
-            "for an age-restricted video — age-restricted playback may not work."
-        )
     # Age probe video itself unavailable (removed/private/geo); fall back to a
     # normal video to at least catch a broken session.
     normal_err = _probe_error(_PROBE_VIDEO_ID)

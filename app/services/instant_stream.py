@@ -30,7 +30,6 @@ from fastapi.responses import StreamingResponse
 from app.utils.ytdlp import (
     PROGRESSIVE_FORMAT,
     cookie_args,
-    note_extraction_error,
     player_client_args,
 )
 
@@ -102,8 +101,11 @@ def _ytdlp_get_url(youtube_video_id: str) -> str:
 
     if result.returncode != 0:
         stderr = result.stderr or result.stdout or ""
-        # Flag cookies as likely-expired if this was an age gate despite cookies.
-        note_extraction_error(stderr)
+        # NB: deliberately do NOT flag cookie status here. With the android
+        # client an age-restricted video age-gates even when the cookies are
+        # valid (android can't use them; web passes age but is SABR-only), so a
+        # resolve failure is not a reliable cookie signal. Cookie validity is
+        # owned by the save-time verify (see app/utils/ytdlp.verify_cookies).
         tail = stderr.strip().splitlines()[-1:]
         detail = tail[0] if tail else "unknown error"
         raise InstantStreamError(
