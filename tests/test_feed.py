@@ -40,27 +40,26 @@ async def test_continue_watching_ordered_by_last_watched(client, make_user):
     assert [item["video"]["id"] for item in items] == [video_b.id, video_a.id]
 
 
-async def test_recently_added_ordered_by_downloaded_at(client, make_user):
+async def test_recently_added_shows_uploads_regardless_of_cache(client, make_user):
+    """Recent uploads from followed channels, newest-upload first — cache-
+    agnostic: a not-yet-cached (CATALOGED) upload still appears."""
     user, headers = await make_user()
     now = utcnow_naive()
     async with async_session_factory() as db:
         channel = await seed_channel(db)
-        old = await seed_video(
-            db,
-            channel,
-            status="COMPLETE",
-            downloaded_at=now - timedelta(days=1),
+        await seed_subscription(db, user["id"], channel.id)
+        older = await seed_video(
+            db, channel, status="COMPLETE", uploaded_at=now - timedelta(days=1)
         )
-        new = await seed_video(db, channel, status="COMPLETE", downloaded_at=now)
-        # Legacy row without downloaded_at sorts last (NULLS LAST).
-        legacy = await seed_video(db, channel, status="COMPLETE")
-        for video in (old, new, legacy):
+        # Newest upload, not cached yet — still shows, and sorts first by upload.
+        newest = await seed_video(db, channel, status="CATALOGED", uploaded_at=now)
+        for video in (older, newest):
             await seed_ref(db, user["id"], video.id)
 
     resp = await client.get("/api/feed/recently-added", headers=headers)
     assert resp.status_code == 200
-    items = resp.json()
-    assert [item["video"]["id"] for item in items] == [new.id, old.id, legacy.id]
+    ids = [item["video"]["id"] for item in resp.json()]
+    assert ids == [newest.id, older.id]
 
 
 async def test_home_feed_aggregates_all_sections(client, make_user):
@@ -143,10 +142,10 @@ async def test_new_episodes_newest_per_channel_and_bounded_by_limit(client, make
     assert channel_ids == [channels[i].id for i in range(limit)]
 
 
-async def test_new_episodes_ranks_only_unwatched_complete_in_channel(client, make_user):
-    """The window-function ranking runs over the filtered set, so a channel's
-    newest *eligible* video wins even when more-recent uploads are watched,
-    removed, or still downloading."""
+async def test_new_episodes_ranks_newest_unwatched_cache_agnostic(client, make_user):
+    """The window-function ranking picks each channel's newest unwatched, present
+    episode — regardless of whether it's been cached yet (download status is
+    invisible here). Watched and removed episodes are still excluded."""
     user, headers = await make_user()
     now = utcnow_naive()
     async with async_session_factory() as db:
@@ -160,17 +159,14 @@ async def test_new_episodes_ranks_only_unwatched_complete_in_channel(client, mak
             db, channel, status="COMPLETE", uploaded_at=now - timedelta(hours=1)
         )
         await seed_ref(db, user["id"], removed.id, removed_at=now)
-        downloading = await seed_video(
-            db, channel, status="DOWNLOADING", uploaded_at=now - timedelta(hours=2)
-        )
-        await seed_ref(db, user["id"], downloading.id)
 
-        # The newest video that is unwatched, present, and COMPLETE.
+        # The newest unwatched, present episode — NOT cached yet (CATALOGED),
+        # but it still wins because download status no longer gates the feed.
         answer = await seed_video(
-            db, channel, status="COMPLETE", uploaded_at=now - timedelta(hours=3)
+            db, channel, status="CATALOGED", uploaded_at=now - timedelta(hours=2)
         )
         await seed_ref(db, user["id"], answer.id)
-        # An older COMPLETE/unwatched video must lose to ``answer``.
+        # An older unwatched episode must lose to ``answer``.
         await seed_ref(
             db,
             user["id"],
@@ -179,7 +175,7 @@ async def test_new_episodes_ranks_only_unwatched_complete_in_channel(client, mak
                     db,
                     channel,
                     status="COMPLETE",
-                    uploaded_at=now - timedelta(hours=4),
+                    uploaded_at=now - timedelta(hours=3),
                 )
             ).id,
         )

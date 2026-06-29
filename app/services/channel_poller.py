@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.models.channel import Channel
 from app.models.subscription import UserSubscription
-from app.models.user_video_ref import UserVideoRef
+from app.models.user_video_ref import REF_KIND_CACHE, UserVideoRef
 from app.models.video import Video
 from app.services.download_manager import (
     fetch_channel_images,
@@ -634,7 +634,13 @@ def _ensure_user_refs_bulk(video_ids: list[str], channel_id: str, db: Session) -
         ).all()
     )
 
+    # New episodes of followed channels are cached quietly for subscribers (they
+    # will likely open them) — a background prefetch, not a visible download.
     for user_id in subscriber_ids:
         for video_id in unique_video_ids:
             if (user_id, video_id) not in existing_pairs:
-                db.add(UserVideoRef(user_id=user_id, video_id=video_id))
+                db.add(
+                    UserVideoRef(
+                        user_id=user_id, video_id=video_id, kind=REF_KIND_CACHE
+                    )
+                )

@@ -24,8 +24,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session as DBSession
 
 from app.config import settings
+from app.models.subscription import UserSubscription
 from app.models.user_queue import UserQueue
 from app.models.user_video_ref import REF_KIND_CACHE, UserVideoRef
+from app.models.video import Video
 from app.services.storage import check_and_delete_orphan_sync
 from app.utils.time import utcnow_naive
 
@@ -33,8 +35,13 @@ logger = logging.getLogger(__name__)
 
 
 def _cache_refs_to_drop(db: DBSession, user_id: str, keep: int) -> list[UserVideoRef]:
-    """Return the user's CACHE refs to soft-remove: those beyond the newest
-    ``keep``, excluding any video pinned by the watch-later queue.
+    """Return the user's evictable CACHE refs to soft-remove: those beyond the
+    newest ``keep``, after pinning videos that must not be dropped here.
+
+    Pinned (never evicted, and excluded from the budget): videos in the user's
+    watch-later queue, and episodes of channels the user follows (those are a
+    deliberate background cache bounded per-channel by subscription retention).
+    So this LRU budget only applies to incidental cold-press cache.
 
     A negative ``keep`` disables eviction (returns nothing); ``keep == 0`` drops
     every non-pinned cache ref.
@@ -42,34 +49,43 @@ def _cache_refs_to_drop(db: DBSession, user_id: str, keep: int) -> list[UserVide
     if keep < 0:
         return []
 
-    refs = (
-        db.execute(
-            select(UserVideoRef)
-            .where(
-                UserVideoRef.user_id == user_id,
-                UserVideoRef.removed_at.is_(None),
-                UserVideoRef.kind == REF_KIND_CACHE,
-            )
-            # Most-recently-watched first; never-watched cache (last_watched_at
-            # NULL) sorts last, with added_at as a stable tiebreaker.
-            .order_by(
-                UserVideoRef.last_watched_at.desc().nullslast(),
-                UserVideoRef.added_at.desc(),
-            )
+    rows = db.execute(
+        select(UserVideoRef, Video.channel_id)
+        .join(Video, UserVideoRef.video_id == Video.id)
+        .where(
+            UserVideoRef.user_id == user_id,
+            UserVideoRef.removed_at.is_(None),
+            UserVideoRef.kind == REF_KIND_CACHE,
         )
-        .scalars()
-        .all()
-    )
+        # Most-recently-watched first; never-watched cache (last_watched_at
+        # NULL) sorts last, with added_at as a stable tiebreaker.
+        .order_by(
+            UserVideoRef.last_watched_at.desc().nullslast(),
+            UserVideoRef.added_at.desc(),
+        )
+    ).all()
 
     queued = set(
         db.execute(select(UserQueue.video_id).where(UserQueue.user_id == user_id))
         .scalars()
         .all()
     )
+    followed = set(
+        db.execute(
+            select(UserSubscription.channel_id).where(
+                UserSubscription.user_id == user_id
+            )
+        )
+        .scalars()
+        .all()
+    )
 
-    # Pinned (queued) videos are never dropped and don't consume the budget.
-    non_queued = [ref for ref in refs if ref.video_id not in queued]
-    return non_queued[keep:]
+    evictable = [
+        ref
+        for ref, channel_id in rows
+        if ref.video_id not in queued and channel_id not in followed
+    ]
+    return evictable[keep:]
 
 
 def enforce_cache_retention(db: DBSession, now: datetime | None = None) -> dict:

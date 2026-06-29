@@ -122,12 +122,11 @@ async def search_videos(
     """
     sort_key = func.coalesce(Video.uploaded_at, Video.created_at)
 
-    # The library grid is the user's *collection* — LIBRARY refs only. Videos
-    # held merely as a play cache never appear here.
+    # Search spans every episode the user holds (followed-channel episodes are
+    # cached, so they're CACHE refs) — not a separate "downloaded" collection.
     filters = [
         UserVideoRef.user_id == user.id,
         UserVideoRef.removed_at.is_(None),
-        UserVideoRef.kind == REF_KIND_LIBRARY,
     ]
     if q and q.strip():
         pattern = f"%{escape_like(q.strip())}%"

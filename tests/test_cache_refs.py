@@ -129,20 +129,22 @@ async def test_download_promotes_cache_ref_to_library(
     assert ref.kind == REF_KIND_LIBRARY
 
 
-async def test_library_grid_excludes_cache_refs(client, make_user):
+async def test_library_grid_includes_cached_episodes(client, make_user):
+    """Search/library spans the user's episodes regardless of how they're held —
+    followed-channel episodes are cached, not a separate 'downloads' collection."""
     user, headers = await make_user()
     async with async_session_factory() as db:
         channel = await seed_channel(db)
-        lib = await seed_video(db, channel, status="COMPLETE", title="Lib")
         cached = await seed_video(db, channel, status="COMPLETE", title="Cached")
-        await seed_ref(db, user["id"], lib.id, kind=REF_KIND_LIBRARY)
+        other = await seed_video(db, channel, status="COMPLETE", title="Other")
         await seed_ref(db, user["id"], cached.id, kind=REF_KIND_CACHE)
+        await seed_ref(db, user["id"], other.id, kind=REF_KIND_LIBRARY)
 
     resp = await client.get("/api/videos", headers=headers)
     assert resp.status_code == 200
     ids = {item["id"] for item in resp.json()["items"]}
-    assert lib.id in ids
-    assert cached.id not in ids
+    assert cached.id in ids
+    assert other.id in ids
 
 
 async def test_downloads_list_excludes_cache(client, make_user):

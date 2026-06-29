@@ -16,7 +16,7 @@ from sqlalchemy.orm import sessionmaker
 from app.config import settings
 from app.models import Base
 from app.models.subscription import UserSubscription
-from app.models.user_video_ref import UserVideoRef
+from app.models.user_video_ref import REF_KIND_CACHE, UserVideoRef
 from app.models.video import Video
 from app.services.retention import KEEP_ALL, KEEP_LAST_N, enforce_retention
 from app.utils.time import utcnow_naive
@@ -83,7 +83,9 @@ def _seed_cataloged_video(db, channel_id: str = CHANNEL_ID):
 
 
 def _seed_ref(db, user_id: str, video_id: str) -> None:
-    db.add(UserVideoRef(user_id=user_id, video_id=video_id))
+    # Followed-channel episodes are cached (CACHE refs); per-subscription
+    # retention bounds those.
+    db.add(UserVideoRef(user_id=user_id, video_id=video_id, kind=REF_KIND_CACHE))
     db.commit()
 
 
