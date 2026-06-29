@@ -17,11 +17,16 @@ settings UI can show what's wrong instead of silently failing.
 """
 
 import os
+import subprocess
 from datetime import datetime, timezone
 
 from app.config import settings
 
 _NETSCAPE_HEADERS = ("# Netscape HTTP Cookie File", "# HTTP Cookie File")
+
+# Stable, public, non-restricted video used to check cookies actually work on
+# save (so "connected" means verified, not just "a file exists").
+_PROBE_VIDEO_ID = "dQw4w9WgXcQ"
 
 # Substrings in a yt-dlp error that mean "the cookies aren't working" — surfaced
 # to the admin so they know to refresh/fix them rather than guessing.
@@ -65,15 +70,77 @@ def cookie_args() -> list[str]:
 def normalize_cookies(content: str) -> str:
     """Coerce a pasted cookies blob into a yt-dlp-loadable Netscape file.
 
-    Strips a BOM/whitespace and, crucially, prepends the Netscape header when
-    it's missing — pasting just the cookie rows (without that first line) is the
-    most common way the file ends up rejected and breaking all playback.
+    Two common copy/paste breakages are repaired, because yt-dlp aborts on
+    either and that breaks every video:
+    * tabs turned into spaces — a Netscape cookie row is 7 fields whose first
+      six never contain spaces, so space-separated rows are rejoined with tabs;
+    * a missing ``# Netscape HTTP Cookie File`` header — prepended when absent.
     """
-    content = content.lstrip("﻿").strip()
-    first_line = content.splitlines()[0].strip() if content else ""
+    fixed: list[str] = []
+    for line in content.lstrip("﻿").strip().splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            fixed.append(line)
+            continue
+        if "\t" not in line:
+            parts = stripped.split()
+            # Only rewrite lines shaped like a Netscape cookie row (flag fields
+            # are TRUE/FALSE and the expiry is numeric) — never plain prose.
+            if (
+                len(parts) >= 7
+                and parts[1] in ("TRUE", "FALSE")
+                and parts[3] in ("TRUE", "FALSE")
+                and parts[4].lstrip("-").isdigit()
+            ):
+                # Keep any spaces inside the value (the 7th field).
+                fixed.append("\t".join(parts[:6]) + "\t" + " ".join(parts[6:]))
+                continue
+        fixed.append(line)
+    out = "\n".join(fixed)
+    first_line = out.splitlines()[0].strip() if out else ""
     if not any(first_line.startswith(h) for h in _NETSCAPE_HEADERS):
-        content = f"{_NETSCAPE_HEADERS[0]}\n{content}"
-    return content + "\n"
+        out = f"{_NETSCAPE_HEADERS[0]}\n{out}"
+    return out + "\n"
+
+
+def verify_cookies() -> str | None:
+    """Check yt-dlp can actually use the saved cookies, so the UI only reports
+    "connected" when they work.
+
+    Returns a short error string if the cookies aren't working (bad format, or a
+    rejected/expired session), else None. Only cookie-related failures count — a
+    problem with the probe video itself is ignored.
+    """
+    path = cookies_path()
+    if path is None:
+        return "No cookies file."
+    cmd = [
+        "yt-dlp",
+        "--cookies",
+        path,
+        "--simulate",
+        "--no-warnings",
+        "--no-playlist",
+        f"https://www.youtube.com/watch?v={_PROBE_VIDEO_ID}",
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except (subprocess.TimeoutExpired, OSError):
+        return None  # don't block the save on a slow/odd probe
+    if result.returncode == 0:
+        return None
+    err = (result.stderr or result.stdout or "").strip()
+    if any(m in err.lower() for m in _COOKIE_TROUBLE_MARKERS):
+        line = next(
+            (
+                ln.strip()
+                for ln in err.splitlines()
+                if any(m in ln.lower() for m in _COOKIE_TROUBLE_MARKERS)
+            ),
+            err,
+        )
+        return line[:300]
+    return None
 
 
 def has_cookie_rows(content: str) -> bool:
