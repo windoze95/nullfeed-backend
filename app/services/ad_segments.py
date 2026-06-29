@@ -53,7 +53,9 @@ def fetch_sponsorblock_segments(youtube_video_id: str) -> list[dict] | None:
     caller can distinguish "no data" from "couldn't check" and fall back to AI in
     both cases without treating an error as a definitive "no ads".
     """
-    params = [("videoID", youtube_video_id)]
+    params: list[tuple[str, str | int | float | bool | None]] = [
+        ("videoID", youtube_video_id)
+    ]
     params += [("category", category) for category in SPONSORBLOCK_CATEGORIES]
     try:
         resp = httpx.get(SPONSORBLOCK_API_URL, params=params, timeout=_REQUEST_TIMEOUT)
