@@ -39,19 +39,18 @@ if [ -f /opt/bgutil-provider/build/main.js ]; then
 fi
 
 # ── Start Celery worker in the background ──────────────────────────────────
+# Run with `&` (not --detach) so the worker's stdout is inherited and its task
+# output — download/preview progress and failures — shows up in `docker logs`.
+# A detached worker daemonizes and its logs never reach the container stream.
 echo "Starting Celery worker..."
 celery -A app.tasks.celery_app worker \
     --loglevel=info \
-    --concurrency="${DOWNLOAD_CONCURRENCY:-2}" \
-    --detach \
-    --logfile=/dev/stdout
+    --concurrency="${DOWNLOAD_CONCURRENCY:-2}" &
 
 # ── Start Celery Beat scheduler in the background ─────────────────────────
 echo "Starting Celery Beat scheduler..."
 celery -A app.tasks.celery_app beat \
-    --loglevel=info \
-    --detach \
-    --logfile=/dev/stdout
+    --loglevel=info &
 
 # ── Start FastAPI ──────────────────────────────────────────────────────────
 echo "Starting FastAPI on port ${PORT}..."

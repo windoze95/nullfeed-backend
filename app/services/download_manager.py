@@ -319,12 +319,14 @@ def download_preview(
     output_template = os.path.join(output_dir, f"{video_id}_preview.%(ext)s")
 
     # Progressive first (no merge); then an adaptive video+audio pair to mux for
-    # SABR-only videos (age-restricted) that have no progressive format.
+    # SABR-only videos (age-restricted) that have no progressive format. Prefer
+    # 360p for the adaptive branch — it's the cold-press preview, so smaller and
+    # faster matters more than resolution.
     format_str = (
         "best[height<=360][ext=mp4]"
-        "/best[height<=480][ext=mp4]"
+        "/bestvideo[height<=360][vcodec^=avc1]+bestaudio[acodec^=mp4a]"
         "/bestvideo[height<=480][vcodec^=avc1]+bestaudio[acodec^=mp4a]"
-        "/bestvideo[height<=480]+bestaudio"
+        "/best[height<=480][ext=mp4]"
         "/worst[ext=mp4]"
     )
 
@@ -339,6 +341,11 @@ def download_preview(
         # harmless for the progressive branch.
         "--merge-output-format",
         "mp4",
+        # Parallel download (like the HQ path). A single-connection pull of a
+        # long adaptive stream is too slow and times out; aria2c keeps even a
+        # 2h+ episode well inside the cap so the preview is ready quickly.
+        "--downloader",
+        "aria2c",
         "--output",
         output_template,
         "--no-playlist",
@@ -357,9 +364,10 @@ def download_preview(
             cmd,
             capture_output=True,
             text=True,
-            # Muxing an adaptive ≤480p pair (the age-restricted path) downloads
-            # the full A/V streams, so allow more than the progressive case.
-            timeout=300,
+            # Muxing an adaptive pair (the age-restricted path) downloads the
+            # full A/V streams; with aria2c this is quick, but allow generous
+            # headroom for long episodes / slow links before giving up.
+            timeout=600,
         )
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"Preview download timed out for {youtube_video_id}")
