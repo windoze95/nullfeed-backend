@@ -31,11 +31,20 @@ redis-server --daemonize yes --loglevel warning
 # ── Start the po_token provider (bgutil) on 127.0.0.1:4416 ─────────────────
 # YouTube serves cookie-authenticated sessions SABR-only formats; the yt-dlp
 # bgutil plugin fetches a PO token from this local server so those formats are
-# downloadable (required for age-restricted playback). Backgrounded; if it dies
-# the plugin just falls back to no-token (non-age videos keep working).
+# downloadable (required for age-restricted playback). Its absence silently
+# hides those formats ("Requested format is not available"), so log its output
+# to stdout and confirm it's actually serving.
 if [ -f /opt/bgutil-provider/build/main.js ]; then
     echo "Starting po_token provider..."
-    ( cd /opt/bgutil-provider && node build/main.js ) >/tmp/bgutil.log 2>&1 &
+    ( cd /opt/bgutil-provider && node build/main.js ) &
+    for i in $(seq 1 15); do
+        if curl -sf -m 2 http://127.0.0.1:4416/ping >/dev/null 2>&1; then
+            echo "po_token provider ready on :4416"
+            break
+        fi
+        [ "$i" = 15 ] && echo "WARNING: po_token provider not responding on :4416 — age-restricted downloads will fail"
+        sleep 1
+    done
 fi
 
 # ── Start Celery worker in the background ──────────────────────────────────
