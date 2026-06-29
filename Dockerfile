@@ -34,21 +34,37 @@ RUN echo "flutter web ${FLUTTER_WEB_REF}@${FLUTTER_WEB_SHA}" && \
     flutter build web --release --no-tree-shake-icons
 
 # ---------------------------------------------------------------------------
+# po_token provider (bgutil). YouTube serves cookie-authenticated sessions
+# SABR-only formats with no plain progressive URLs; the yt-dlp bgutil plugin
+# (requirements.txt) fetches a PO token from this local node server so those
+# formats become downloadable — required for age-restricted playback. Bundled
+# here (Debian 12, same base as runtime) so the all-in-one image needs no
+# separate container; started by the entrypoint on 127.0.0.1:4416.
+FROM brainicism/bgutil-ytdlp-pot-provider AS potprovider
+
+# ---------------------------------------------------------------------------
 # Backend runtime (no web bundle). This is the fast per-PR CI target.
 FROM python:3.12-slim AS runtime
 
 LABEL maintainer="NullFeed" \
       description="NullFeed - Self-Hosted YouTube Media Center Backend"
 
-# Install runtime dependencies: ffmpeg, redis-server, and gosu for UID mapping
+# Install runtime dependencies: ffmpeg, redis-server, gosu for UID mapping, and
+# libatomic1 (a runtime dep of the bundled node binary on some arches).
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         aria2 \
         ffmpeg \
         redis-server \
         gosu \
+        libatomic1 \
         curl && \
     rm -rf /var/lib/apt/lists/*
+
+# Bundle the bgutil po_token provider (node runtime + built server). The yt-dlp
+# plugin auto-connects to it at 127.0.0.1:4416 once the entrypoint starts it.
+COPY --from=potprovider /usr/local/bin/node /usr/local/bin/node
+COPY --from=potprovider /app /opt/bgutil-provider
 
 # Copy Python packages from builder stage
 COPY --from=builder /install /usr/local

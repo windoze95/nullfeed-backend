@@ -28,6 +28,16 @@ python -m alembic upgrade head
 echo "Starting Redis..."
 redis-server --daemonize yes --loglevel warning
 
+# ── Start the po_token provider (bgutil) on 127.0.0.1:4416 ─────────────────
+# YouTube serves cookie-authenticated sessions SABR-only formats; the yt-dlp
+# bgutil plugin fetches a PO token from this local server so those formats are
+# downloadable (required for age-restricted playback). Backgrounded; if it dies
+# the plugin just falls back to no-token (non-age videos keep working).
+if [ -f /opt/bgutil-provider/build/main.js ]; then
+    echo "Starting po_token provider..."
+    ( cd /opt/bgutil-provider && node build/main.js ) >/tmp/bgutil.log 2>&1 &
+fi
+
 # ── Start Celery worker in the background ──────────────────────────────────
 echo "Starting Celery worker..."
 celery -A app.tasks.celery_app worker \
