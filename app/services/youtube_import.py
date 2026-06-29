@@ -12,6 +12,8 @@ import subprocess
 import time
 from typing import Any
 
+from app.utils.ytdlp import cookie_args
+
 logger = logging.getLogger(__name__)
 
 CACHE_TTL_SECONDS = 3600
@@ -89,7 +91,15 @@ def _run_yt_dlp_json(url: str, extra_args: list[str], timeout: int) -> dict[str,
     Blocking; callers run this via asyncio.to_thread. Always passes
     --no-update so the version nag never pollutes stderr.
     """
-    cmd = ["yt-dlp", "--no-update", "--flat-playlist", *extra_args, "-J", url]
+    cmd = [
+        "yt-dlp",
+        *cookie_args(),
+        "--no-update",
+        "--flat-playlist",
+        *extra_args,
+        "-J",
+        url,
+    ]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:

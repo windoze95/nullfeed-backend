@@ -14,6 +14,7 @@ from collections.abc import Callable
 import httpx
 
 from app.config import settings
+from app.utils.ytdlp import cookie_args
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +169,7 @@ def download_video(
 
     cmd = [
         "yt-dlp",
+        *cookie_args(),
         "--format",
         format_str,
         "--merge-output-format",
@@ -318,6 +320,7 @@ def download_preview(
 
     cmd = [
         "yt-dlp",
+        *cookie_args(),
         "--format",
         format_str,
         "--output",
@@ -376,6 +379,7 @@ def fetch_transcript(youtube_video_id: str) -> list[dict] | None:
         output_template = os.path.join(tmp, "%(id)s.%(ext)s")
         cmd = [
             "yt-dlp",
+            *cookie_args(),
             "--skip-download",
             "--write-auto-subs",
             "--write-subs",

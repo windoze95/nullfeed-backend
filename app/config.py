@@ -16,6 +16,11 @@ class Settings(BaseSettings):
     catalog_fetch_count: int = 50
     download_concurrency: int = 2
     media_quality: str = "1080p"
+    # Path to a Netflix-style cookies.txt exported from a logged-in YouTube
+    # session. Required for age-restricted / members-only videos (yt-dlp can't
+    # extract them otherwise — "Sign in to confirm your age"). Empty falls back
+    # to <config_path>/cookies.txt if that file exists.
+    youtube_cookies_file: str = ""
     metadata_refresh_interval_hours: int = 12
 
     # Polling cadence (adaptive, per channel).

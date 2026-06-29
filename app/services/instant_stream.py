@@ -27,6 +27,8 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 from fastapi.responses import StreamingResponse
 
+from app.utils.ytdlp import cookie_args
+
 logger = logging.getLogger(__name__)
 
 # Progressive (muxed) selectors only — a single file AVPlayer / video_player can
@@ -88,6 +90,7 @@ def _ytdlp_get_url(youtube_video_id: str) -> str:
     url = f"https://www.youtube.com/watch?v={youtube_video_id}"
     cmd = [
         "yt-dlp",
+        *cookie_args(),
         "--format",
         _PROGRESSIVE_FORMAT,
         "--get-url",
