@@ -12,7 +12,7 @@ from app.database import get_db
 from app.models.channel import Channel
 from app.models.subscription import UserSubscription
 from app.models.user import User
-from app.models.user_video_ref import UserVideoRef
+from app.models.user_video_ref import REF_KIND_CACHE, UserVideoRef
 from app.models.video import Video
 from app.schemas.channel import (
     BulkSubscribeItem,
@@ -76,10 +76,16 @@ async def _ensure_refs_for_channel(
         )
     )
     refs_by_video = {ref.video_id: ref for ref in ref_result.scalars().all()}
+    # Following a channel quietly caches its episodes (so they open instantly) —
+    # it is not a user-managed "download/library". Refs are CACHE; the cache
+    # reaper leaves followed-channel videos alone (per-subscription retention
+    # bounds them instead), so they persist while subscribed.
     for video_id in video_ids:
         ref = refs_by_video.get(video_id)
         if ref is None:
-            db.add(UserVideoRef(user_id=user_id, video_id=video_id))
+            db.add(
+                UserVideoRef(user_id=user_id, video_id=video_id, kind=REF_KIND_CACHE)
+            )
         elif ref.removed_at is not None:
             ref.removed_at = None
 

@@ -7,7 +7,7 @@ from app.database import get_db
 from app.models.channel import Channel
 from app.models.subscription import UserSubscription
 from app.models.user import User
-from app.models.user_video_ref import REF_KIND_LIBRARY, UserVideoRef
+from app.models.user_video_ref import UserVideoRef
 from app.models.video import Video
 from app.schemas.channel import ChannelOut
 from app.schemas.feed import FeedItem, HomeFeed
@@ -110,10 +110,8 @@ async def _new_episodes_items(
         .where(
             UserVideoRef.user_id == user.id,
             UserVideoRef.removed_at.is_(None),
-            UserVideoRef.kind == REF_KIND_LIBRARY,
             UserVideoRef.is_watched == False,  # noqa: E712
             Video.channel_id.in_(subscribed_ids),
-            Video.status == "COMPLETE",
         )
         .subquery()
     )
@@ -143,7 +141,18 @@ async def _new_episodes_items(
 async def _recently_added_items(
     user: User, db: AsyncSession, limit: int
 ) -> list[FeedItem]:
-    """Chronological list of newly downloaded videos across subscribed channels."""
+    """Most recent uploads across the user's followed channels.
+
+    Episode-based and cache-agnostic: a new upload shows here as soon as it's
+    cataloged, whether or not it has been cached yet.
+    """
+    sub_result = await db.execute(
+        select(UserSubscription.channel_id).where(UserSubscription.user_id == user.id)
+    )
+    subscribed_ids = [row[0] for row in sub_result.all()]
+    if not subscribed_ids:
+        return []
+
     result = await db.execute(
         select(UserVideoRef, Video, Channel)
         .join(Video, UserVideoRef.video_id == Video.id)
@@ -151,12 +160,11 @@ async def _recently_added_items(
         .where(
             UserVideoRef.user_id == user.id,
             UserVideoRef.removed_at.is_(None),
-            UserVideoRef.kind == REF_KIND_LIBRARY,
-            Video.status == "COMPLETE",
+            Video.channel_id.in_(subscribed_ids),
         )
         .order_by(
-            Video.downloaded_at.desc().nullslast(),
-            Video.created_at.desc(),
+            func.coalesce(Video.uploaded_at, Video.created_at).desc(),
+            Video.id.desc(),
         )
         .limit(limit)
     )

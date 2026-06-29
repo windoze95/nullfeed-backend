@@ -14,6 +14,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.config import settings
 from app.models import Base
+from app.models.subscription import UserSubscription
 from app.models.user_queue import UserQueue
 from app.models.user_video_ref import (
     REF_KIND_CACHE,
@@ -43,16 +44,16 @@ def _abs_media(rel_path: str) -> str:
     return os.path.join(settings.media_path, rel_path)
 
 
-def _seed_downloaded_video(db) -> Video:
+def _seed_downloaded_video(db, channel_id: str = CHANNEL_ID) -> Video:
     vid_id = str(uuid.uuid4())
     yt_id = f"yt{uuid.uuid4().hex[:9]}"
-    rel_path = f"{CHANNEL_ID}/{vid_id}.mp4"
+    rel_path = f"{channel_id}/{vid_id}.mp4"
     _write(_abs_media(rel_path))
     _write(os.path.join(settings.thumbnails_path, f"{yt_id}.jpg"), b"thumb")
     video = Video(
         id=vid_id,
         youtube_video_id=yt_id,
-        channel_id=CHANNEL_ID,
+        channel_id=channel_id,
         title="V",
         status="COMPLETE",
         file_path=rel_path,
@@ -175,4 +176,29 @@ def test_shared_cache_not_reclaimed_while_another_ref_active(monkeypatch):
     assert _ref(db, "u1", v.id).removed_at is not None
     assert _ref(db, "u2", v.id).removed_at is None
     assert os.path.exists(_abs_media(v.file_path))  # shared file survives
+    db.close()
+
+
+def test_followed_channel_cache_is_pinned(monkeypatch):
+    """Followed-channel episodes are pinned in the global reaper (their disk use
+    is bounded per-channel by subscription retention instead); only incidental
+    cold-press cache for unfollowed channels is LRU-evicted."""
+    monkeypatch.setattr(settings, "cache_retention_count", 0)  # evict all non-pinned
+    db = _make_db()
+    followed = _seed_downloaded_video(db, channel_id="chan-followed")
+    cold = _seed_downloaded_video(db, channel_id="chan-cold")
+    _seed_ref(db, "u1", followed.id, REF_KIND_CACHE)
+    _seed_ref(db, "u1", cold.id, REF_KIND_CACHE)
+    db.add(
+        UserSubscription(
+            user_id="u1", channel_id="chan-followed", retention_policy="KEEP_ALL"
+        )
+    )
+    db.commit()
+
+    enforce_cache_retention(db)
+
+    assert _ref(db, "u1", followed.id).removed_at is None
+    assert _ref(db, "u1", cold.id).removed_at is not None
+    assert os.path.exists(_abs_media(followed.file_path))
     db.close()
