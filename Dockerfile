@@ -18,8 +18,15 @@ RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 # build it once (not once per target arch) and avoid emulating Flutter on arm64.
 FROM --platform=$BUILDPLATFORM ghcr.io/cirruslabs/flutter:${FLUTTER_VERSION} AS webbuild
 ARG FLUTTER_WEB_REF
+# Cache-bust the web build with the flutter main commit sha. Otherwise the
+# `git clone + flutter build web` layer is cached forever (its command text
+# never changes), freezing the served bundle at whatever flutter main was when
+# the cache was first filled. CI passes the current sha so this layer rebuilds
+# whenever flutter main advances.
+ARG FLUTTER_WEB_SHA=dev
 WORKDIR /src
-RUN git clone --depth 1 --branch ${FLUTTER_WEB_REF} \
+RUN echo "flutter web ${FLUTTER_WEB_REF}@${FLUTTER_WEB_SHA}" && \
+    git clone --depth 1 --branch ${FLUTTER_WEB_REF} \
         https://github.com/windoze95/nullfeed-flutter.git . && \
     git config --global --add safe.directory /src && \
     flutter pub get && \

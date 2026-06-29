@@ -1,6 +1,9 @@
 name: Docker Publish
 
 on:
+  # Manual rebuild — use this to pull the latest flutter web bundle into the
+  # image after a web-only change (the backend itself need not have changed).
+  workflow_dispatch:
   push:
     branches: [main]
     tags: ["v*"]
@@ -41,12 +44,21 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=sha,prefix=
 
+      - name: Resolve flutter main commit (cache-bust for the web build)
+        id: flutter
+        run: |
+          sha=$(git ls-remote https://github.com/windoze95/nullfeed-flutter.git refs/heads/main | cut -f1)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "flutter main is at $sha"
+
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
           # Full image: backend + the Flutter web app baked in and served at /.
           target: web
+          build-args: |
+            FLUTTER_WEB_SHA=${{ steps.flutter.outputs.sha }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
