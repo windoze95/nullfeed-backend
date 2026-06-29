@@ -17,8 +17,8 @@ from app.utils.ytdlp import (
     cookies_status,
     has_cookie_rows,
     normalize_cookies,
-    note_extraction_error,
     save_cookies,
+    set_cookies_error,
     verify_cookies,
 )
 
@@ -61,10 +61,11 @@ async def put_youtube_cookies(
             ),
         )
     save_cookies(body.cookies)
-    # Verify they actually work so the UI reports "connected" only when true.
+    # Verify they actually work (against an age-restricted video) so the UI
+    # reports "connected" only when age-restricted playback will succeed.
     error = verify_cookies()
     if error:
-        note_extraction_error(error)
+        set_cookies_error(error)
     logger.info(
         "YouTube cookies updated by admin %s (working=%s)", user.id, error is None
     )

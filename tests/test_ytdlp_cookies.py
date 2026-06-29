@@ -112,39 +112,44 @@ def test_normalize_repairs_spaces_to_tabs():
     assert ytdlp.has_cookie_rows(out)
 
 
-def test_verify_cookies_distinguishes_cookie_vs_other_errors(monkeypatch, tmp_path):
+def test_verify_cookies_probes_age_restricted(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "youtube_cookies_file", "")
     monkeypatch.setattr(settings, "config_path", str(tmp_path))
     ytdlp.save_cookies(".youtube.com\tTRUE\t/\tTRUE\t0\tA\tB")
 
-    def result(returncode, stderr):
-        class _R:
-            pass
-
-        r = _R()
-        r.returncode = returncode
-        r.stdout = ""
-        r.stderr = stderr
-        return r
-
-    # Success → working.
-    monkeypatch.setattr(ytdlp.subprocess, "run", lambda *a, **k: result(0, ""))
+    # Age-restricted probe resolves → fully working.
+    monkeypatch.setattr(ytdlp, "_probe_error", lambda vid: None)
     assert ytdlp.verify_cookies() is None
 
-    # A cookie-related failure → reported.
+    # Age gate on the age probe → "doesn't unlock age-restricted".
     monkeypatch.setattr(
-        ytdlp.subprocess,
-        "run",
-        lambda *a, **k: result(
-            1, "ERROR: 'c.txt' does not look like a Netscape format cookies file"
+        ytdlp,
+        "_probe_error",
+        lambda vid: (
+            "ERROR: Sign in to confirm your age"
+            if vid == ytdlp._AGE_PROBE_VIDEO_ID
+            else None
         ),
     )
-    err = ytdlp.verify_cookies()
-    assert err is not None and "Netscape" in err
+    msg = ytdlp.verify_cookies()
+    assert msg is not None and "age-restricted" in msg
 
-    # A failure unrelated to cookies (e.g. the probe video) → not flagged.
+    # Malformed file → surfaced verbatim.
     monkeypatch.setattr(
-        ytdlp.subprocess, "run", lambda *a, **k: result(1, "ERROR: Video unavailable")
+        ytdlp,
+        "_probe_error",
+        lambda vid: "ERROR: does not look like a Netscape format cookies file",
+    )
+    msg = ytdlp.verify_cookies()
+    assert msg is not None and "Netscape" in msg
+
+    # Age probe unavailable but the normal session is fine → not flagged.
+    monkeypatch.setattr(
+        ytdlp,
+        "_probe_error",
+        lambda vid: (
+            "ERROR: Video unavailable" if vid == ytdlp._AGE_PROBE_VIDEO_ID else None
+        ),
     )
     assert ytdlp.verify_cookies() is None
 
