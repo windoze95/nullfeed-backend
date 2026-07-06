@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NullFeed — Self-hosted YouTube, minus the algorithm</title>
+<meta name="description" content="NullFeed is a self-hosted YouTube media center: follow your channels, cache every new upload to your own server, and watch ad-free on iPhone, Apple TV, and the web. No ads. No tracking. No algorithm.">
+<link rel="canonical" href="https://nullfeed.wtf/">
+<meta property="og:site_name" content="NullFeed">
+<meta property="og:title" content="NullFeed — Self-hosted YouTube, minus the algorithm">
+<meta property="og:description" content="Follow your channels. Cache every upload to your own server. Watch ad-free on iPhone, Apple TV, and the web. No ads. No tracking. No algorithm.">
+<meta property="og:url" content="https://nullfeed.wtf/">
+<meta property="og:type" content="website">
+<meta property="og:image" content="https://nullfeed.wtf/static/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="theme-color" content="#050505">
+<link rel="icon" href="/static/favicon.png" type="image/png">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<link rel="preload" href="/static/fonts/bigshoulders-var.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/static/fonts/archivo-var.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/static/fonts/martianmono-var.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/site.css">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"SoftwareApplication","name":"NullFeed","operatingSystem":"iOS, tvOS, Web, Self-hosted (Docker)","applicationCategory":"MultimediaApplication","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"url":"https://nullfeed.wtf/","image":"https://nullfeed.wtf/static/og.png","description":"Self-hosted YouTube media center: follow your channels, cache new uploads to your own server, and watch ad-free on iPhone, Apple TV, and the web — with sponsor-segment skipping and zero tracking.","license":"https://www.gnu.org/licenses/gpl-3.0.html","sameAs":["https://github.com/windoze95/nullfeed-backend"]}
+</script>
+</head>
+<body>
+
+<div class="glow glow-hero" aria-hidden="true"></div>
+
+<nav class="site-nav">
+  <div class="wrap nav-row">
+    <a class="brand" href="/">
+      <svg class="mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#7C4DFF"/><path d="M9 11.5h14M9 16h14M9 20.5h14" stroke="#050505" stroke-width="2.6" stroke-linecap="round"/><path d="M24.5 8.5l-17 15" stroke="#F2F0FA" stroke-width="2.6" stroke-linecap="round"/></svg>
+      <span class="wordmark"><span class="null">NULL</span><span class="feed">FEED</span></span>
+    </a>
+    <div class="nav-links">
+      <a href="#how">How it works</a>
+      <a href="#features">Features</a>
+      <a href="#selfhost">Self-host</a>
+      <a class="gh" href="https://github.com/windoze95/nullfeed-backend" target="_blank" rel="noopener" aria-label="NullFeed on GitHub">
+        <svg viewBox="0 0 16 16" width="20" height="20" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+      </a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="wrap hero-grid">
+    <div class="hero-copy">
+      <p class="kicker rise"><code class="k-code">feed = null</code><span class="k-sep">·</span>Self-hosted<span class="k-sep">·</span>GPL-3.0</p>
+      <h1 class="rise d1">The algorithm stops <em>at your router.</em></h1>
+      <p class="lede rise d2">NullFeed is a self-hosted YouTube media center. Follow the channels you actually care about, and your own server quietly caches every new upload for instant, ad-free playback on iPhone, Apple&nbsp;TV, and the web. Nothing recommended. Nothing tracked. Nothing you didn't ask for.</p>
+      <div class="ctas rise d3">
+        <a class="btn btn-violet" href="https://github.com/windoze95/nullfeed-backend" target="_blank" rel="noopener">Self-host it on GitHub</a>
+        <a class="btn btn-ghost" href="#how">See how it works</a>
+      </div>
+      <p class="hero-note rise d4">One Docker container · Unraid-native · iPhone &amp; Apple&nbsp;TV apps in TestFlight</p>
+    </div>
+    <div class="hero-visual rise d2" aria-hidden="true">
+      <figure class="player">
+        <figcaption class="player-bar">
+          <span class="live-dot"></span>
+          <span class="player-title">NOW PLAYING — FROM YOUR OWN DISK</span>
+        </figcaption>
+        <div class="screen">
+          <div class="static"></div>
+          <div class="scan"></div>
+          <div class="play-btn"><svg viewBox="0 0 24 24" width="30" height="30" fill="currentColor"><path d="M8 5.5v13l11-6.5z"/></svg></div>
+          <div class="skip-toast">SPONSOR SEGMENT → SKIPPED</div>
+        </div>
+        <div class="player-meta">
+          <div class="meta-title">The new upload from a channel you chose</div>
+          <div class="meta-sub">dropped 14 min ago · cached before you noticed</div>
+          <div class="progress">
+            <span class="prog-fill"></span>
+            <span class="sponsor s1"></span>
+            <span class="sponsor s2"></span>
+            <span class="prog-head"></span>
+          </div>
+        </div>
+      </figure>
+      <span class="float-chip chip-cache"><i></i>CACHED · 1080p</span>
+      <span class="float-chip chip-new"><i></i>NEW UPLOAD · 14m</span>
+    </div>
+  </div>
+</header>
+
+<div class="marquee" aria-hidden="true">
+  <div class="marquee-track">
+    <span><b>NO</b> ADS · <b>NO</b> PRE-ROLL · <b>NO</b> TRACKING · <b>NO</b> ALGORITHM · <b>NO</b> AUTOPLAY · <b>NO</b> SPONSOR READS · <b>NO</b> GOOGLE ACCOUNT · <b>NO</b> MONTHLY FEE · </span><span><b>NO</b> ADS · <b>NO</b> PRE-ROLL · <b>NO</b> TRACKING · <b>NO</b> ALGORITHM · <b>NO</b> AUTOPLAY · <b>NO</b> SPONSOR READS · <b>NO</b> GOOGLE ACCOUNT · <b>NO</b> MONTHLY FEE · </span>
+  </div>
+</div>
+
+<section class="how" id="how">
+  <div class="wrap">
+    <p class="kicker reveal">How it works</p>
+    <h2 class="section-title reveal">You pick. It fetches. You&nbsp;watch.</h2>
+    <div class="trio">
+      <article class="tcard reveal">
+        <span class="tnum">01</span>
+        <h3>Point it at your channels</h3>
+        <p>Paste a channel link and your server starts watching it. Import your YouTube identity for a head start — or don't. Either way, no Google account required to watch.</p>
+      </article>
+      <article class="tcard reveal">
+        <span class="tnum">02</span>
+        <h3>It hoards, quietly</h3>
+        <p>New uploads cache straight to your disk on your schedule — one deduplicated copy per video, bounded retention, full quality fetched in the background. A library with zero babysitting.</p>
+      </article>
+      <article class="tcard reveal">
+        <span class="tnum">03</span>
+        <h3>You watch, in peace</h3>
+        <p>Native apps on iPhone and Apple&nbsp;TV, plus a web app baked into the container. Sponsor segments get skipped, positions sync everywhere, and nothing autoplays you down a rabbit hole at 2&nbsp;a.m.</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section class="features" id="features">
+  <div class="wrap">
+    <p class="kicker reveal">The good stuff</p>
+    <h2 class="section-title reveal">Every feature holds a&nbsp;grudge.</h2>
+    <div class="fgrid">
+      <article class="fcard reveal">
+        <h3>Instant playback, even uncached</h3>
+        <p>Tap a video that isn't cached yet and it plays immediately — reverse-proxied through your server — while the full-quality copy lands in the background and swaps in mid-watch. No spinner. No waiting.</p>
+      </article>
+      <article class="fcard reveal">
+        <h3>Sponsor reads? Skipped.</h3>
+        <p>SponsorBlock data — with a Claude fallback straight from the transcript — maps every baked-in ad, and the player leaps over them with a little toast. You'll never hear “but first” again.</p>
+      </article>
+      <article class="fcard reveal">
+        <h3>A cache, not a chore</h3>
+        <p>One copy of each video on disk, reference-counted across the household, evicted automatically when space gets tight. Set retention once and never manage a download again.</p>
+      </article>
+      <article class="fcard reveal">
+        <h3>Profiles with locks</h3>
+        <p>Everyone gets their own subscriptions, history, queue, and continue-watching — behind an optional PIN. Your kid's channels stay out of your feed, and vice&nbsp;versa.</p>
+      </article>
+      <article class="fcard reveal">
+        <h3>The only algorithm works for you</h3>
+        <p>An optional Discover tab runs on Claude with your own API key, suggesting channels from your subscription graph. Dismiss anything. Refresh on demand. Or never turn it on at all.</p>
+      </article>
+      <article class="fcard reveal">
+        <h3>Live on every screen</h3>
+        <p>SwiftUI on Apple&nbsp;TV, Flutter on iPhone, web at <code>/</code>. WebSocket push tells every client the moment a cache finishes, an upload drops, or a sponsor map is ready.</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section class="selfhost" id="selfhost">
+  <div class="wrap sh-grid">
+    <div class="sh-copy">
+      <p class="kicker reveal">Self-host it</p>
+      <h2 class="section-title reveal">One container. Zero permission&nbsp;slips.</h2>
+      <p class="reveal">The whole thing — API, workers, web app, database — ships as a single Docker image. Point four volumes at your disks and you're running.</p>
+      <ul class="sh-list reveal">
+        <li>Single container, port <code>8484</code></li>
+        <li>Web app <em>and</em> API docs baked in at <code>/</code></li>
+        <li>Unraid Community Apps template</li>
+        <li>yt-dlp auto-updates on every boot</li>
+        <li>GPL-3.0 — <a href="https://github.com/windoze95/nullfeed-backend" target="_blank" rel="noopener">fork it if you hate it</a></li>
+      </ul>
+    </div>
+    <figure class="terminal reveal">
+      <figcaption class="term-bar"><span class="dots"><i></i><i></i><i></i></span><span class="term-title">docker-compose.yml</span><button class="copy-btn" type="button" data-copy="services:&#10;  nullfeed:&#10;    image: ghcr.io/windoze95/nullfeed-backend:latest&#10;    ports:&#10;      - &quot;8484:8484&quot;&#10;    volumes:&#10;      - ./media:/data/media&#10;      - ./db:/data/db&#10;      - ./config:/data/config&#10;      - ./thumbnails:/data/thumbnails&#10;    environment:&#10;      # optional — Claude-powered Discover tab&#10;      - ANTHROPIC_API_KEY=&#10;    restart: unless-stopped">Copy</button></figcaption>
+      <pre><code><span class="y">services</span>:
+  <span class="y">nullfeed</span>:
+    <span class="y">image</span>: ghcr.io/windoze95/nullfeed-backend:latest
+    <span class="y">ports</span>:
+      - <span class="g">"8484:8484"</span>
+    <span class="y">volumes</span>:
+      - ./media:/data/media
+      - ./db:/data/db
+      - ./config:/data/config
+      - ./thumbnails:/data/thumbnails
+    <span class="y">environment</span>:
+      <span class="c"># optional — Claude-powered Discover tab</span>
+      - ANTHROPIC_API_KEY=
+    <span class="y">restart</span>: unless-stopped</code></pre>
+    </figure>
+  </div>
+</section>
+
+<section class="get" id="get">
+  <div class="glow glow-get" aria-hidden="true"></div>
+  <div class="wrap get-panel">
+    <svg class="get-mark reveal" viewBox="0 0 32 32" width="88" height="88" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#7C4DFF"/><path d="M9 11.5h14M9 16h14M9 20.5h14" stroke="#050505" stroke-width="2.6" stroke-linecap="round"/><path d="M24.5 8.5l-17 15" stroke="#F2F0FA" stroke-width="2.6" stroke-linecap="round"/></svg>
+    <h2 class="section-title reveal">Null your feed tonight.</h2>
+    <p class="lede center reveal">Free. Open source. GPL-3.0. If it runs on your hardware, it runs by your&nbsp;rules.</p>
+    <div class="get-ctas reveal">
+      <a class="btn btn-violet" href="https://github.com/windoze95/nullfeed-backend" target="_blank" rel="noopener">Get started on GitHub</a>
+      <a class="btn btn-ghost" href="https://github.com/windoze95/nullfeed-flutter" target="_blank" rel="noopener">Apps for iPhone &amp; Apple&nbsp;TV</a>
+    </div>
+  </div>
+</section>
+
+<footer class="site-footer">
+  <div class="wrap foot-row">
+    <div>
+      <a class="brand" href="/">
+        <svg class="mark" viewBox="0 0 32 32" width="24" height="24" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#7C4DFF"/><path d="M9 11.5h14M9 16h14M9 20.5h14" stroke="#050505" stroke-width="2.6" stroke-linecap="round"/><path d="M24.5 8.5l-17 15" stroke="#F2F0FA" stroke-width="2.6" stroke-linecap="round"/></svg>
+        <span class="wordmark"><span class="null">NULL</span><span class="feed">FEED</span></span>
+      </a>
+      <p class="foot-tag">YouTube, on your terms.</p>
+    </div>
+    <div class="foot-links">
+      <a href="https://github.com/windoze95/nullfeed-backend" target="_blank" rel="noopener">Server</a>
+      <a href="https://github.com/windoze95/nullfeed-flutter" target="_blank" rel="noopener">iPhone app</a>
+      <a href="https://github.com/windoze95/nullfeed-tvos" target="_blank" rel="noopener">Apple TV app</a>
+      <a href="https://github.com/windoze95/nullfeed-backend/issues" target="_blank" rel="noopener">Issues</a>
+    </div>
+  </div>
+  <div class="wrap foot-small">© 2026 Julian Dice · Open source under GPL-3.0 · No ads, no analytics, no tracking — here or in the app.</div>
+</footer>
+
+<script>
+document.querySelectorAll('.copy-btn').forEach(function (btn) {
+  btn.addEventListener('click', function () {
+    navigator.clipboard.writeText(btn.getAttribute('data-copy')).then(function () {
+      btn.textContent = 'Copied ✓';
+      setTimeout(function () { btn.textContent = 'Copy'; }, 1600);
+    });
+  });
+});
+if ('IntersectionObserver' in window) {
+  var io = new IntersectionObserver(function (entries) {
+    entries.forEach(function (e) { if (e.isIntersecting) { e.target.classList.add('shown'); io.unobserve(e.target); } });
+  }, { rootMargin: '0px 0px -8% 0px' });
+  document.querySelectorAll('.reveal').forEach(function (el) { io.observe(el); });
+} else {
+  document.querySelectorAll('.reveal').forEach(function (el) { el.classList.add('shown'); });
+}
+</script>
+</body>
+</html>

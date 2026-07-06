@@ -303,6 +303,12 @@ To run the backend locally without Docker:
 
 ---
 
+## Marketing Site
+
+The public site lives in [`site/`](site/) — plain static HTML/CSS, no build step. Merges to `main` that touch `site/` deploy it to Cloudflare Pages via `.github/workflows/site.yml` when the `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` repo secrets are set; manual deploy is `npx wrangler pages deploy site --project-name=nullfeed`.
+
+---
+
 ## License
 
 This project is licensed under the [GNU General Public License v3.0](LICENSE).
