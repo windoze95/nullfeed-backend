@@ -14,6 +14,12 @@ from collections.abc import Callable
 import httpx
 
 from app.config import settings
+from app.utils.unplayable import (
+    UnplayableVideoError,
+    classify_entry,
+    classify_extraction_error,
+    extract_error_text,
+)
 from app.utils.ytdlp import cookie_args, player_client_args
 
 logger = logging.getLogger(__name__)
@@ -207,6 +213,10 @@ def download_video(
     progress_re = re.compile(r"\[download\]\s+([\d.]+)%|\((\d+)%\)")
     last_callback_time = 0.0
     last_line = ""
+    # stderr is merged into stdout, and yt-dlp's "ERROR: …" line isn't always
+    # last (aria2c chatter can follow) — track it separately so a failure is
+    # reported/classified from the actual error, not trailing noise.
+    last_error_line = ""
 
     # Read the tuning constants at call time (not via the watchdog's default
     # args, which bind at import) so they can be overridden in tests.
@@ -223,6 +233,8 @@ def download_video(
         for line in stdout_lines:
             watchdog.note_output()
             last_line = line
+            if "error" in line.lower():
+                last_error_line = line
 
             if heartbeat_callback is not None:
                 heartbeat_callback()
@@ -274,8 +286,15 @@ def download_video(
         )
 
     if process.returncode != 0:
-        logger.error("yt-dlp failed for %s: %s", youtube_video_id, last_line)
-        raise RuntimeError(f"yt-dlp failed: {last_line[:500]}")
+        err_text = (last_error_line or last_line).strip()
+        logger.error("yt-dlp failed for %s: %s", youtube_video_id, err_text)
+        reason = classify_extraction_error(err_text)
+        if reason:
+            # Video-inherent refusal (age gate, members-only, removed, …):
+            # retrying can't succeed, so raise the non-retried error and let
+            # the task record why.
+            raise UnplayableVideoError(reason, f"yt-dlp failed: {err_text[:500]}")
+        raise RuntimeError(f"yt-dlp failed: {err_text[:500]}")
 
     # Find the downloaded file
     file_path = _find_downloaded_file(output_dir, youtube_video_id)
@@ -381,8 +400,9 @@ def download_preview(
         raise RuntimeError(f"Preview download timed out for {youtube_video_id}")
 
     if result.returncode != 0:
-        tail = (result.stderr or result.stdout or "").strip().splitlines()[-1:]
-        detail = tail[0] if tail else "unknown error"
+        detail = (
+            extract_error_text(result.stderr or result.stdout or "") or "unknown error"
+        )
         # "Requested format is not available" usually means the po_token provider
         # is down (authenticated SABR formats stay hidden). Dump what yt-dlp does
         # see so we can tell "no formats at all" (po_token) from "selector miss".
@@ -409,6 +429,12 @@ def download_preview(
                 )
             except Exception:
                 logger.warning("Could not list formats for %s", youtube_video_id)
+        reason = classify_extraction_error(detail)
+        if reason:
+            raise UnplayableVideoError(
+                reason,
+                f"Preview download failed for {youtube_video_id}: {detail[:300]}",
+            )
         raise RuntimeError(
             f"Preview download failed for {youtube_video_id}: {detail[:300]}"
         )
@@ -727,6 +753,11 @@ def fetch_channel_videos(
                         "title": data.get("title", ""),
                         "duration_seconds": int(data.get("duration") or 0),
                         "upload_date": data.get("upload_date"),
+                        # Flat entries carry availability derived from the tab
+                        # badges ("Members only", premium) and a live_status, so
+                        # membership/premium/upcoming videos get labeled at
+                        # catalog time instead of on their first failed fetch.
+                        "unplayable_reason": classify_entry(data),
                     }
                 )
                 # Extract channel metadata from the first entry
@@ -840,13 +871,29 @@ def fetch_channel_rss(
     }
 
 
-def fetch_videos_metadata(video_ids: list[str]) -> list[dict]:
+# Per-video failure line in yt-dlp's stderr for a multi-URL batch, e.g.
+# "ERROR: [youtube] dQw4w9WgXcQ: Join this channel to get access …". The 11-char
+# id ties the message back to the video that failed.
+_YTDLP_ERROR_RE = re.compile(r"ERROR:\s*(?:\[[^\]]+\]\s*)?([A-Za-z0-9_-]{11}):\s*(.+)")
+
+
+def fetch_videos_metadata(
+    video_ids: list[str], titles: dict[str, str] | None = None
+) -> list[dict]:
     """Fetch yt-dlp metadata for specific video IDs, preserving input order.
 
     Used after RSS discovery surfaces genuinely-new uploads: only those IDs are
     extracted (typically one or two), instead of re-scanning the whole channel.
-    Returns dicts shaped like ``fetch_channel_videos`` entries; IDs that fail to
-    extract (private, removed, geo-blocked) are simply omitted.
+    Returns dicts shaped like ``fetch_channel_videos`` entries.
+
+    IDs whose extraction fails for a video-inherent reason (members-only, age
+    gate, premium, private, removed, an unaired premiere) are still returned, as
+    stub entries carrying ``unplayable_reason`` — so they get cataloged and the
+    clients can banner them instead of the video silently never appearing.
+    ``titles`` (id -> title, e.g. from the RSS entries that surfaced the ids)
+    names those stubs; without it the stub falls back to the video id. IDs that
+    fail for any other reason (network, bot check) are omitted as before, so a
+    flaky poll doesn't catalog mislabeled rows.
     """
     if not video_ids:
         return []
@@ -855,6 +902,7 @@ def fetch_videos_metadata(video_ids: list[str]) -> list[dict]:
     cmd = ["yt-dlp", "--dump-json", "--no-playlist", *urls]
 
     by_id: dict[str, dict] = {}
+    failures: dict[str, str] = {}
     try:
         # One video may fail (returncode != 0) while others succeed, so parse
         # whatever JSON lines came back regardless of the exit status.
@@ -873,8 +921,15 @@ def fetch_videos_metadata(video_ids: list[str]) -> list[dict]:
                     "title": data.get("title", ""),
                     "duration_seconds": int(data.get("duration") or 0),
                     "upload_date": data.get("upload_date"),
+                    # Extraction succeeded, but the availability badges can
+                    # still say the media itself is gated (members/premium).
+                    "unplayable_reason": classify_entry(data),
                 }
         if result.returncode != 0:
+            for err_line in (result.stderr or "").splitlines():
+                match = _YTDLP_ERROR_RE.search(err_line)
+                if match:
+                    failures[match.group(1)] = match.group(2)
             logger.warning(
                 "yt-dlp metadata fetch returned %s for %d id(s); got %d",
                 result.returncode,
@@ -883,6 +938,20 @@ def fetch_videos_metadata(video_ids: list[str]) -> list[dict]:
             )
     except Exception as e:
         logger.warning("Failed to fetch metadata for %s: %s", video_ids, e)
+
+    for vid, error in failures.items():
+        if vid in by_id or vid not in video_ids:
+            continue
+        reason = classify_extraction_error(error)
+        if reason is None:
+            continue  # transient/unrecognized: drop the id, as before
+        by_id[vid] = {
+            "youtube_video_id": vid,
+            "title": (titles or {}).get(vid) or vid,
+            "duration_seconds": 0,
+            "upload_date": None,
+            "unplayable_reason": reason,
+        }
 
     # Preserve the requested (newest-first) order; drop any that didn't resolve.
     return [by_id[vid] for vid in video_ids if vid in by_id]

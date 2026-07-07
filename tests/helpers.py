@@ -74,6 +74,7 @@ async def seed_video(
     uploaded_at: datetime | None = None,
     preview_file_path: str | None = None,
     preview_status: str | None = None,
+    unplayable_reason: str | None = None,
 ) -> Video:
     video = Video(
         id=str(uuid.uuid4()),
@@ -86,6 +87,7 @@ async def seed_video(
         uploaded_at=uploaded_at,
         preview_file_path=preview_file_path,
         preview_status=preview_status,
+        unplayable_reason=unplayable_reason,
     )
     db.add(video)
     await db.commit()

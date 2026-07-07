@@ -194,7 +194,7 @@ def test_failing_channel_job_does_not_abort_others(eager_celery, task_db, monkey
     monkeypatch.setattr(
         channel_poller,
         "fetch_videos_metadata",
-        lambda ids: [
+        lambda ids, titles=None: [
             {
                 "youtube_video_id": vid,
                 "title": vid,
