@@ -31,6 +31,7 @@
 }
 
 :root {
+  color-scheme: dark;
   --bg: #050505;
   --bg-2: #0A0912;
   --surface: #0B0A12;
@@ -373,6 +374,8 @@ h1 em { font-style: normal; color: var(--violet-bright); }
 .chip-cache i { background: var(--green); box-shadow: 0 0 8px var(--green); }
 .chip-new { bottom: -14px; left: -16px; transform: rotate(-2deg); animation: bob 6.5s ease-in-out infinite reverse; }
 .chip-new i { background: var(--amber); box-shadow: 0 0 8px var(--amber); }
+.chip-cold { top: 37%; left: -20px; transform: rotate(-2deg); animation: bob 7.5s ease-in-out infinite .8s; }
+.chip-cold i { background: var(--violet-bright); box-shadow: 0 0 8px var(--violet-bright); }
 
 /* ---------- marquee — the wall of NOs ---------- */
 .marquee {
@@ -615,6 +618,7 @@ section { position: relative; z-index: 1; }
   .marquee-track span { font-size: 1.2rem; }
   .chip-cache { right: -4px; }
   .chip-new { left: -4px; }
+  .chip-cold { left: -4px; }
   .get-panel { padding: 48px 22px 46px; }
   .foot-row { flex-direction: column; }
 }
