@@ -307,7 +307,7 @@ def test_routine_poll_rss_new_id_catalogs_via_metadata(monkeypatch):
     )
     meta_calls = {}
 
-    def fake_meta(ids):
+    def fake_meta(ids, titles=None):
         meta_calls["ids"] = ids
         return [
             {

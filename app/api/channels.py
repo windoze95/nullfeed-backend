@@ -526,6 +526,8 @@ async def list_channel_videos(
             uploaded_at=v.uploaded_at,
             file_size_bytes=v.file_size_bytes or 0,
             status=v.status,
+            preview_status=v.preview_status,
+            unplayable_reason=v.unplayable_reason,
             thumbnail_url=f"/data/thumbnails/{v.youtube_video_id}.jpg",
             watch_position_seconds=ref.watch_position_seconds if ref else 0,
             is_watched=ref.is_watched if ref else False,

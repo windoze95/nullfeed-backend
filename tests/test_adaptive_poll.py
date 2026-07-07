@@ -238,7 +238,7 @@ def test_routine_new_upload_poll_shortens_cadence(monkeypatch):
     monkeypatch.setattr(
         channel_poller,
         "fetch_videos_metadata",
-        lambda ids: [
+        lambda ids, titles=None: [
             {
                 "youtube_video_id": vid,
                 "title": vid,

@@ -41,6 +41,12 @@ class Video(Base):
     # no ads were found).
     ad_segments: Mapped[list | None] = mapped_column(JSON, nullable=True)
     ad_segments_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # Why YouTube refuses this video (age_restricted, members_only, premium,
+    # private, geo_blocked, removed, drm, upcoming, unavailable — see
+    # app/utils/unplayable.py). Set when a poll, download, preview, or
+    # instant-stream attempt hits a video-inherent refusal; cleared whenever an
+    # attempt later succeeds. NULL = playable as far as we know.
+    unplayable_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
     downloaded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # Liveness signal for an in-flight download: set when the row enters
     # DOWNLOADING and refreshed by the worker as yt-dlp produces output. The

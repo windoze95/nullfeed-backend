@@ -14,6 +14,10 @@ class VideoOut(BaseModel):
     file_size_bytes: int = 0
     status: str = "CATALOGED"
     preview_status: str | None = None
+    # Why YouTube refuses this video (age_restricted, members_only, premium,
+    # private, geo_blocked, removed, drm, upcoming, unavailable), or None when
+    # playable as far as we know. Clients render this as a banner.
+    unplayable_reason: str | None = None
     thumbnail_url: str | None = None
     watch_position_seconds: int = 0
     is_watched: bool = False

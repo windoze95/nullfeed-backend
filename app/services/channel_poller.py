@@ -19,6 +19,7 @@ from app.services.download_manager import (
 from app.services.progress_broadcaster import publish_new_episode
 from app.services.push_gateway import send_to_users
 from app.utils.time import utcnow_naive
+from app.utils.unplayable import SOFT_REASONS
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +188,11 @@ def _catalog_videos(
     adaptive cadence are folded into the same commit; the WebSub path passes
     ``False`` so the poll schedule (the RSS fallback) is left entirely untouched.
     Returns ``{"cataloged_ids", "auto_download_ids"}``.
+
+    Entries carrying a hard ``unplayable_reason`` (members-only, premium,
+    removed, …) are still cataloged — visibility is the point — but sit out
+    auto-download and new-episode notifications, since fetching can't succeed
+    and notifying about unwatchable content is noise.
     """
     channel_id = channel.id
     cataloged_ids: list[str] = []
@@ -238,6 +244,14 @@ def _catalog_videos(
             except (ValueError, TypeError):
                 pass
 
+        # A video-inherent refusal known at discovery time (members-only /
+        # premium badge, unaired premiere, or a classified extraction failure).
+        # Hard reasons never auto-download (it can't succeed) and stay out of
+        # new-episode pushes (notifying about unwatchable content is noise) —
+        # the labeled row in the feed is the visibility.
+        reason = yt_vid.get("unplayable_reason")
+        hard_blocked = bool(reason) and reason not in SOFT_REASONS
+
         # Create new video record as CATALOGED (not PENDING)
         video = Video(
             id=str(uuid.uuid4()),
@@ -247,6 +261,7 @@ def _catalog_videos(
             duration_seconds=yt_vid.get("duration_seconds", 0),
             uploaded_at=uploaded_at,
             status="CATALOGED",
+            unplayable_reason=reason,
             created_at=poll_started_at - timedelta(seconds=index),
         )
         db.add(video)
@@ -255,15 +270,17 @@ def _catalog_videos(
         id_by_ytid[yt_video_id] = video.id
 
         video_ids_for_refs.append(video.id)
-        new_video_ids.append(video.id)
+        if not hard_blocked:
+            new_video_ids.append(video.id)
         cataloged_ids.append(video.id)
-        new_videos_for_events.append(
-            {
-                "id": video.id,
-                "title": video.title,
-                "youtube_video_id": video.youtube_video_id,
-            }
-        )
+        if not hard_blocked:
+            new_videos_for_events.append(
+                {
+                    "id": video.id,
+                    "title": video.title,
+                    "youtube_video_id": video.youtube_video_id,
+                }
+            )
         logger.info("New video cataloged: %s (%s)", yt_video_id, video.title)
 
     # One batched ref-ensure over every video this batch touched, instead of the
@@ -408,7 +425,13 @@ def _discover_routine(channel: Channel, db: Session) -> list[dict] | None:
         return None
 
     logger.info("RSS surfaced %d new video(s) for channel %s", len(new_ids), channel.id)
-    return fetch_videos_metadata(new_ids)
+    # The feed already named every id; pass the titles along so an id whose
+    # extraction fails for a video-inherent reason (members-only, premiere) is
+    # cataloged under its real title rather than the bare video id.
+    rss_titles = {
+        e["youtube_video_id"]: e["title"] for e in rss["entries"] if e.get("title")
+    }
+    return fetch_videos_metadata(new_ids, titles=rss_titles)
 
 
 def refresh_stale_channel_metadata(db: Session) -> int:

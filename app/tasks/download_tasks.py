@@ -34,6 +34,7 @@ from app.services.retention import enforce_retention
 from app.services.session_reaper import reap_expired_sessions
 from app.services.websub import sync_subscriptions
 from app.utils.time import utcnow_naive
+from app.utils.unplayable import UnplayableVideoError
 from app.services.progress_broadcaster import (
     publish_ad_segments_ready,
     publish_download_complete,
@@ -336,6 +337,9 @@ def download_video_task(
         video.duration_seconds = result["duration_seconds"]
         video.metadata_json = result.get("metadata_json")
         video.status = "COMPLETE"
+        # A finished download proves the video is fetchable; drop any stale
+        # refusal label (e.g. an age gate recorded before cookies were added).
+        video.unplayable_reason = None
         video.downloaded_at = utcnow_naive()
 
         if result.get("uploaded_at"):
@@ -399,6 +403,26 @@ def download_video_task(
         except Exception:
             logger.exception("Could not confirm cancel for video %s", video_id)
         return {"status": "cancelled", "video_id": video_id}
+
+    except UnplayableVideoError as exc:
+        # YouTube refused the video for a reason inherent to it (age gate,
+        # members-only, premium, removed, …). Retrying can't succeed — the
+        # exception type is outside autoretry_for on purpose — so mark the
+        # video FAILED and record why, for the clients to banner.
+        logger.warning("Video %s is unplayable (%s): %s", video_id, exc.reason, exc)
+        try:
+            db.rollback()
+            video = db.get(Video, video_id)
+            if video:
+                if video.status == "DOWNLOADING":
+                    video.status = "FAILED"
+                video.unplayable_reason = exc.reason
+                db.commit()
+        except Exception:
+            logger.exception(
+                "Could not record unplayable reason for video %s", video_id
+            )
+        return {"status": "unplayable", "reason": exc.reason, "video_id": video_id}
 
     except Exception as exc:
         logger.exception("Download failed for video %s", video_id)
@@ -466,12 +490,34 @@ def download_preview_task(self, video_id: str, user_id: str) -> dict:
 
         video.preview_file_path = result["file_path"]
         video.preview_status = "READY"
+        # A working preview proves the video is fetchable; drop any stale label.
+        video.unplayable_reason = None
         db.commit()
 
         publish_preview_ready(video_id, user_id)
 
         logger.info("Preview ready: %s (%s)", video.youtube_video_id, video.title)
         return {"status": "complete", "video_id": video_id}
+
+    except UnplayableVideoError as exc:
+        # Video-inherent refusal: record why (for client banners) and reset
+        # preview_status so nothing looks in-flight. Not re-raised — the type
+        # is outside autoretry_for on purpose, a retry can't succeed.
+        logger.warning(
+            "Preview for video %s is unplayable (%s): %s", video_id, exc.reason, exc
+        )
+        try:
+            db.rollback()
+            video = db.get(Video, video_id)
+            if video:
+                video.preview_status = None
+                video.unplayable_reason = exc.reason
+                db.commit()
+        except Exception:
+            logger.exception(
+                "Could not record unplayable reason for video %s", video_id
+            )
+        return {"status": "unplayable", "reason": exc.reason, "video_id": video_id}
 
     except Exception as exc:
         logger.exception("Preview download failed for video %s", video_id)

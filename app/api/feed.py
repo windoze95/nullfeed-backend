@@ -33,6 +33,7 @@ def _video_out(video: Video, ref: UserVideoRef | None = None) -> VideoOut:
         file_size_bytes=video.file_size_bytes or 0,
         status=video.status,
         preview_status=video.preview_status,
+        unplayable_reason=video.unplayable_reason,
         thumbnail_url=f"/data/thumbnails/{video.youtube_video_id}.jpg",
         watch_position_seconds=ref.watch_position_seconds if ref else 0,
         is_watched=ref.is_watched if ref else False,

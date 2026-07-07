@@ -27,6 +27,7 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 from fastapi.responses import StreamingResponse
 
+from app.utils.unplayable import classify_extraction_error, extract_error_text
 from app.utils.ytdlp import (
     PROGRESSIVE_FORMAT,
     cookie_args,
@@ -71,7 +72,16 @@ _cache_lock = threading.Lock()
 
 
 class InstantStreamError(Exception):
-    """Raised when a progressive source URL cannot be resolved."""
+    """Raised when a progressive source URL cannot be resolved.
+
+    ``reason`` carries the canonical unplayable reason (app/utils/unplayable)
+    when the failure is inherent to the video — age gate, members-only,
+    removed, … — and None for infrastructural/transient failures.
+    """
+
+    def __init__(self, message: str, reason: str | None = None):
+        super().__init__(message)
+        self.reason = reason
 
 
 def _ytdlp_get_url(youtube_video_id: str) -> str:
@@ -106,10 +116,10 @@ def _ytdlp_get_url(youtube_video_id: str) -> str:
         # valid (android can't use them; web passes age but is SABR-only), so a
         # resolve failure is not a reliable cookie signal. Cookie validity is
         # owned by the save-time verify (see app/utils/ytdlp.verify_cookies).
-        tail = stderr.strip().splitlines()[-1:]
-        detail = tail[0] if tail else "unknown error"
+        detail = extract_error_text(stderr) or "unknown error"
         raise InstantStreamError(
-            f"Resolve failed for {youtube_video_id}: {detail[:300]}"
+            f"Resolve failed for {youtube_video_id}: {detail[:300]}",
+            reason=classify_extraction_error(detail),
         )
 
     # -g prints one URL per selected stream; a progressive format yields exactly

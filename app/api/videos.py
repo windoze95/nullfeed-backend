@@ -53,6 +53,7 @@ from app.utils.tickets import (
     verify_ticket,
 )
 from app.utils.time import utcnow_naive
+from app.utils.unplayable import SOFT_REASONS
 
 router = APIRouter(prefix="/api/videos", tags=["videos"])
 logger = logging.getLogger(__name__)
@@ -188,6 +189,7 @@ async def search_videos(
             file_size_bytes=video.file_size_bytes or 0,
             status=video.status,
             preview_status=video.preview_status,
+            unplayable_reason=video.unplayable_reason,
             thumbnail_url=f"/data/thumbnails/{video.youtube_video_id}.jpg",
             watch_position_seconds=ref.watch_position_seconds,
             is_watched=ref.is_watched,
@@ -247,6 +249,7 @@ async def get_active_downloads(
             file_size_bytes=v.file_size_bytes or 0,
             status=v.status,
             preview_status=v.preview_status,
+            unplayable_reason=v.unplayable_reason,
             thumbnail_url=f"/data/thumbnails/{v.youtube_video_id}.jpg",
             channel_name=v.channel.name if v.channel else "",
         )
@@ -279,6 +282,14 @@ async def prewarm_previews(
             Video.id.in_(video_ids),
             Video.status != "COMPLETE",
             Video.preview_status.is_(None),
+            # A video YouTube refuses for a hard, video-inherent reason
+            # (members-only, premium, removed, …) can't be pre-warmed; soft
+            # reasons stay eligible — an age gate passes once cookies work and
+            # a premiere airs eventually, and the success clears the label.
+            or_(
+                Video.unplayable_reason.is_(None),
+                Video.unplayable_reason.in_(SOFT_REASONS),
+            ),
         )
     )
     eligible = result.scalars().all()
@@ -330,6 +341,7 @@ async def get_video(
         file_size_bytes=video.file_size_bytes or 0,
         status=video.status,
         preview_status=video.preview_status,
+        unplayable_reason=video.unplayable_reason,
         thumbnail_url=f"/data/thumbnails/{video.youtube_video_id}.jpg",
         watch_position_seconds=ref.watch_position_seconds if ref else 0,
         is_watched=ref.is_watched if ref else False,
@@ -676,9 +688,31 @@ async def instant_stream(
 
     try:
         url = await asyncio.to_thread(resolve_progressive_url, video.youtube_video_id)
+    except InstantStreamError as exc:
+        logger.warning("instant-stream resolve failed for %s: %s", video_id, exc)
+        if exc.reason:
+            # The refusal is inherent to the video (age gate, members-only,
+            # removed, …): persist it so listings banner the video from now on.
+            video.unplayable_reason = exc.reason
+            await db.commit()
+            raise HTTPException(
+                status_code=502,
+                detail=f"Could not start instant stream ({exc.reason})",
+            ) from exc
+        raise HTTPException(
+            status_code=502, detail="Could not start instant stream"
+        ) from exc
+
+    # A successful resolve proves the video is fetchable — drop any stale label
+    # (a premiere that has since aired, an age gate after cookies were added).
+    if video.unplayable_reason is not None:
+        video.unplayable_reason = None
+        await db.commit()
+
+    try:
         return await stream_proxy(url, range_header)
     except InstantStreamError as exc:
-        logger.warning("instant-stream resolve/proxy failed for %s: %s", video_id, exc)
+        logger.warning("instant-stream proxy failed for %s: %s", video_id, exc)
         raise HTTPException(
             status_code=502, detail="Could not start instant stream"
         ) from exc
