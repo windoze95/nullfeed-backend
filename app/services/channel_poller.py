@@ -188,6 +188,11 @@ def _catalog_videos(
     adaptive cadence are folded into the same commit; the WebSub path passes
     ``False`` so the poll schedule (the RSS fallback) is left entirely untouched.
     Returns ``{"cataloged_ids", "auto_download_ids"}``.
+
+    Entries carrying a hard ``unplayable_reason`` (members-only, premium,
+    removed, …) are still cataloged — visibility is the point — but sit out
+    auto-download and new-episode notifications, since fetching can't succeed
+    and notifying about unwatchable content is noise.
     """
     channel_id = channel.id
     cataloged_ids: list[str] = []
