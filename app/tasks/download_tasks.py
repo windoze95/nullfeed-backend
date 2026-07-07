@@ -362,10 +362,13 @@ def download_video_task(
 
         db.commit()
 
-        # Notify all subscribers of this channel. Isolated from the retry
+        # Notify all subscribers of this channel, plus the user whose play
+        # triggered this download — a cache download from a non-followed
+        # channel (search, recommendations, watch-later) must still reach the
+        # watching player so it can swap preview -> HQ. Isolated from the retry
         # path: a publish failure after commit must never re-download.
         try:
-            subscriber_ids = (
+            notify_ids = set(
                 db.execute(
                     select(UserSubscription.user_id).where(
                         UserSubscription.channel_id == video.channel_id
@@ -374,7 +377,9 @@ def download_video_task(
                 .scalars()
                 .all()
             )
-            for sub_user_id in subscriber_ids:
+            if user_id:
+                notify_ids.add(user_id)
+            for sub_user_id in notify_ids:
                 publish_download_complete(
                     video_id,
                     sub_user_id,

@@ -19,7 +19,7 @@ from app.services.download_reaper import (
 )
 from app.tasks.download_tasks import _get_sync_db
 from app.utils.time import utcnow_naive
-from tests.helpers import seed_channel, seed_ref, seed_video
+from tests.helpers import seed_channel, seed_ref, seed_subscription, seed_video
 
 
 # --- Task 1: download watchdog (silent-hang detection) ---------------------
@@ -105,6 +105,48 @@ async def test_download_task_marks_failed_when_download_stalls(
             await db.execute(select(Video.status).where(Video.id == vid))
         ).scalar_one()
     assert status == "FAILED"
+
+
+@pytest.mark.asyncio
+async def test_download_complete_notifies_initiator_and_subscribers(
+    client, make_user, monkeypatch, eager_celery, tmp_path
+):
+    """The completion event must reach the user whose play triggered the cache
+    download, even when they don't follow the channel — that event is what
+    lets their player swap preview -> HQ mid-playback."""
+    watcher, _ = await make_user("Watcher")
+    follower, _ = await make_user("Follower")
+    async with async_session_factory() as db:
+        channel = await seed_channel(db)
+        video = await seed_video(db, channel, status="PENDING")
+        # Only the follower subscribes; the watcher cold-pressed from search.
+        await seed_subscription(db, follower["id"], channel.id)
+    vid = video.id
+
+    import app.tasks.download_tasks as dt
+
+    monkeypatch.setattr(dt.settings, "media_path", str(tmp_path))
+    monkeypatch.setattr(
+        dt,
+        "download_video",
+        lambda **kwargs: {
+            "file_path": "test-channel/video.mp4",
+            "file_size_bytes": 1024,
+            "title": "Test Video",
+            "duration_seconds": 60,
+        },
+    )
+    publish = MagicMock()
+    monkeypatch.setattr(dt, "publish_download_complete", publish)
+
+    result = dt.download_video_task.delay(vid, watcher["id"]).get()
+    assert result["status"] == "complete"
+
+    notified = {call.args[1] for call in publish.call_args_list}
+    assert notified == {watcher["id"], follower["id"]}
+    # One event per user — the initiator must not be double-notified when
+    # they also subscribe.
+    assert publish.call_count == 2
 
 
 # --- Task 1: crash reaper ---------------------------------------------------
