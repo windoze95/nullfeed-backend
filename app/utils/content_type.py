@@ -29,6 +29,13 @@ AGE_RESTRICTED = "age_restricted"
 MEMBERS_ONLY = "members_only"
 PREMIUM = "premium"
 
+# The full vocabulary, for validating a per-channel content filter's requested
+# hidden types (reject anything outside this so a typo can't silently hide
+# nothing or everything).
+ALL_CONTENT_TYPES = frozenset(
+    {REGULAR, SHORT, LIVE, PREMIERE, AGE_RESTRICTED, MEMBERS_ONLY, PREMIUM}
+)
+
 # Types cataloged for visibility but never auto-downloaded or announced as new
 # episodes by default: auto-pulling every discovered Short and multi-hour
 # livestream is exactly what would flood storage, so they stay hands-off until a

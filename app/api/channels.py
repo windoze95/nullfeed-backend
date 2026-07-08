@@ -22,10 +22,12 @@ from app.schemas.channel import (
     ChannelDetail,
     ChannelOut,
     ChannelSubscribe,
+    ContentFilterUpdate,
 )
 from app.schemas.video import VideoOut, VideoPagination
 from app.services.channel_poller import poll_single_channel
 from app.services.download_manager import fetch_channel_images, fetch_channel_metadata
+from app.utils.content_type import ALL_CONTENT_TYPES, REGULAR
 from app.tasks.download_tasks import (
     _get_sync_db,
     download_video_task,
@@ -411,6 +413,7 @@ async def refresh_channel_images(
     detail.is_subscribed = sub is not None
     if sub:
         detail.tracking_mode = sub.tracking_mode
+        detail.hidden_content_types = sub.hidden_content_types or []
     return detail
 
 
@@ -471,7 +474,56 @@ async def get_channel(
     detail.is_subscribed = sub is not None
     if sub:
         detail.tracking_mode = sub.tracking_mode
+        detail.hidden_content_types = sub.hidden_content_types or []
     return detail
+
+
+@router.put("/{channel_id}/content-filter", response_model=ChannelDetail)
+async def set_content_filter(
+    channel_id: str,
+    body: ContentFilterUpdate,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ChannelDetail:
+    """Replace the content types this user has hidden for a channel — the
+    per-channel filter the client's type menu drives. An empty list clears it.
+    """
+    # Reject unknown types so a client typo can't create a filter that silently
+    # hides nothing (or, mishandled elsewhere, everything).
+    unknown = [t for t in body.hidden_content_types if t not in ALL_CONTENT_TYPES]
+    if unknown:
+        raise HTTPException(
+            status_code=422, detail=f"Unknown content types: {', '.join(unknown)}"
+        )
+
+    sub_result = await db.execute(
+        select(UserSubscription).where(
+            UserSubscription.user_id == user.id,
+            UserSubscription.channel_id == channel_id,
+        )
+    )
+    sub = sub_result.scalar_one_or_none()
+    if sub is None:
+        raise HTTPException(status_code=404, detail="Not subscribed to this channel")
+
+    # Dedup and store None when empty so "nothing hidden" is a clean NULL.
+    hidden = list(dict.fromkeys(body.hidden_content_types))
+    sub.hidden_content_types = hidden or None
+    await db.commit()
+
+    return await get_channel(channel_id, user=user, db=db)
+
+
+async def _hidden_types_for(channel_id: str, user: User, db: AsyncSession) -> list[str]:
+    """The content types this user has hidden for a channel (empty if none / not
+    subscribed) — the gate applied to the channel's video list and feeds."""
+    result = await db.execute(
+        select(UserSubscription.hidden_content_types).where(
+            UserSubscription.user_id == user.id,
+            UserSubscription.channel_id == channel_id,
+        )
+    )
+    return result.scalar_one_or_none() or []
 
 
 @router.get("/{channel_id}/videos", response_model=VideoPagination)
@@ -479,12 +531,25 @@ async def list_channel_videos(
     channel_id: str,
     page: int = Query(1, ge=1),
     per_page: int = Query(20, ge=1, le=100),
+    include_hidden: bool = Query(
+        False,
+        description="Include content types the user has hidden for this channel "
+        "(the 'show hidden' reveal). Off by default so the gate applies.",
+    ),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> VideoPagination:
+    # The per-channel content gate: omit hidden types unless the caller is
+    # explicitly revealing them. NULL content_type (rows cataloged before the
+    # field existed) counts as "regular", so it's hidden only if regular is.
+    hidden = [] if include_hidden else await _hidden_types_for(channel_id, user, db)
+    filters = [Video.channel_id == channel_id]
+    if hidden:
+        filters.append(func.coalesce(Video.content_type, REGULAR).notin_(hidden))
+
     # Total count
     total_result = await db.execute(
-        select(func.count()).select_from(Video).where(Video.channel_id == channel_id)
+        select(func.count()).select_from(Video).where(*filters)
     )
     total = total_result.scalar() or 0
 
@@ -494,7 +559,7 @@ async def list_channel_videos(
     # episodes sort to the top instead of the bottom.
     result = await db.execute(
         select(Video)
-        .where(Video.channel_id == channel_id)
+        .where(*filters)
         .order_by(func.coalesce(Video.uploaded_at, Video.created_at).desc())
         .offset(offset)
         .limit(per_page)
