@@ -29,6 +29,16 @@ class ChannelSubscribe(BaseModel):
 class ChannelDetail(ChannelOut):
     subscriber_count: int = 0
     tracking_mode: str | None = None
+    # Content types this user has hidden for this channel (empty when nothing is
+    # hidden or the user isn't subscribed). Backs the per-channel filter menu.
+    hidden_content_types: list[str] = Field(default_factory=list)
+
+
+class ContentFilterUpdate(BaseModel):
+    """Replace the set of content types hidden for a channel. An empty list
+    clears the filter (show everything)."""
+
+    hidden_content_types: list[str] = Field(default_factory=list)
 
 
 class BulkSubscribeItem(BaseModel):

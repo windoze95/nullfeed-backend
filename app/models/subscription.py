@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String
+from sqlalchemy import JSON, DateTime, ForeignKey, Index, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models import Base
@@ -21,6 +21,11 @@ class UserSubscription(Base):
     retention_policy: Mapped[str] = mapped_column(String(20), default="KEEP_ALL")
     retention_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     tracking_mode: Mapped[str] = mapped_column(String(20), default="FUTURE_ONLY")
+    # Content types this user has hidden for this channel (see
+    # app/utils/content_type.py) — a JSON list like ["short", "live"]. The
+    # channel's video list and feeds omit these unless explicitly revealed. NULL
+    # or [] means nothing is hidden (show everything).
+    hidden_content_types: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
     user = relationship("User", back_populates="subscriptions")
     channel = relationship("Channel", back_populates="subscriptions")
