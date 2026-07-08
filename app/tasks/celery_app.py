@@ -66,6 +66,14 @@ celery_app.conf.beat_schedule = {
         "task": "app.tasks.download_tasks.enforce_video_cache_task",
         "schedule": settings.cache_retention_interval_hours * 3600,
     },
+    # Back-catalog catch-up for the content-type feature: discover each channel's
+    # Shorts/livestreams and classify content_type-NULL rows, a few channels at a
+    # time. Winds down to a no-op once caught up (an indexed "any NULL rows?"
+    # check), so a modest cadence is fine and it stays quiet thereafter.
+    "reconcile-content-types": {
+        "task": "app.tasks.download_tasks.reconcile_content_task",
+        "schedule": 900,  # every 15 minutes
+    },
 }
 
 # WebSub (PubSubHubbub) subscription upkeep — only scheduled when a public

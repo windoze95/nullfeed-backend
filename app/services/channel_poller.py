@@ -19,11 +19,25 @@ from app.services.download_manager import (
 )
 from app.services.progress_broadcaster import publish_new_episode
 from app.services.push_gateway import send_to_users
-from app.utils.content_type import CATALOG_ONLY_TYPES, LIVE, REGULAR, SHORT
+from app.utils.content_type import (
+    CATALOG_ONLY_TYPES,
+    LIVE,
+    REGULAR,
+    SHORT,
+    classify_content_type,
+)
 from app.utils.time import utcnow_naive
 from app.utils.unplayable import SOFT_REASONS
 
 logger = logging.getLogger(__name__)
+
+# Content reconciliation (the back-catalog catch-up job): how many
+# content_type-NULL videos to classify per channel per pass, and how many
+# channels to sweep per beat. Bounded so the per-video yt-dlp extraction can't
+# stampede YouTube (which rate-limits / bot-checks bulk extraction) — the sweep
+# just chips away each tick and winds down to a no-op once everything is typed.
+RECONCILE_VIDEOS_PER_CHANNEL = 15
+RECONCILE_CHANNELS_PER_RUN = 8
 
 
 def _as_naive_utc(value: datetime | None) -> datetime | None:
@@ -182,7 +196,10 @@ def poll_single_channel(channel_id: str, db: Session) -> dict:
         )
     else:
         # Routine poll: cheap RSS conditional GET. Only genuinely-new video IDs
-        # fall through to yt-dlp for full metadata.
+        # fall through to yt-dlp for full metadata. (Discovery of a channel's
+        # back-catalog Shorts/livestreams — which RSS and /videos never surface —
+        # is handled off the poll path by the throttled content-reconcile job, so
+        # routine polls stay cheap.)
         discovered = _discover_routine(channel, db)
         if discovered is None:
             # 304 Not Modified, or the feed surfaced no unseen videos: nothing
@@ -350,6 +367,94 @@ def _catalog_videos(
         _emit_new_episode_events(channel_id, new_videos_for_events, db)
 
     return {"cataloged_ids": cataloged_ids, "auto_download_ids": auto_download_ids}
+
+
+def channels_needing_reconcile(db: Session, limit: int) -> list[str]:
+    """Subscribed channels that still have content_type-NULL videos to classify.
+
+    Naturally winds down: a channel drops out once its back catalog is typed
+    (videos cataloged after the content-type feature are classified at ingest),
+    so the periodic sweep converges to a no-op.
+    """
+    stmt = (
+        select(Video.channel_id)
+        .join(UserSubscription, UserSubscription.channel_id == Video.channel_id)
+        .where(Video.content_type.is_(None))
+        .distinct()
+        .limit(limit)
+    )
+    return [row[0] for row in db.execute(stmt).all()]
+
+
+def reconcile_channel_content(channel_id: str, db: Session) -> dict:
+    """Catch a channel's back catalog up to the content-type model.
+
+    Two steps, both bounded and idempotent so the periodic sweep converges
+    without hammering YouTube:
+
+    1. **Discover** the channel's Shorts + livestreams (which RSS and the
+       /videos tab never surface — the tab scan otherwise only ran on the first
+       poll). Cataloged silently and catalog-only, exactly like a poll.
+    2. **Classify** up to ``RECONCILE_VIDEOS_PER_CHANNEL`` content_type-NULL rows
+       — from the stored download ``metadata_json`` when we already have it
+       (free), else one batched yt-dlp extraction of the rest (a single call for
+       the whole batch). A row that fails extraction transiently stays NULL and
+       is retried on a later pass.
+    """
+    channel = db.get(Channel, channel_id)
+    if channel is None:
+        return {"discovered": 0, "classified": 0}
+
+    # 1) Discover back-catalog Shorts + livestreams (catalog-only; silent).
+    cid = channel.youtube_channel_id
+    tab_videos = _merge_tab_entries(
+        fetch_channel_tab(cid, "/shorts", SHORT),
+        fetch_channel_tab(cid, "/streams", LIVE),
+    )
+    discovered = 0
+    if tab_videos:
+        result = _catalog_videos(
+            channel, tab_videos, db, had_initial_poll=True, update_schedule=False
+        )
+        discovered = len(result["cataloged_ids"])
+
+    # 2) Classify content_type-NULL rows.
+    null_videos = (
+        db.execute(
+            select(Video)
+            .where(Video.channel_id == channel_id, Video.content_type.is_(None))
+            .limit(RECONCILE_VIDEOS_PER_CHANNEL)
+        )
+        .scalars()
+        .all()
+    )
+    need_fetch: list[Video] = []
+    for video in null_videos:
+        if video.metadata_json:
+            video.content_type = classify_content_type(video.metadata_json)
+        else:
+            need_fetch.append(video)
+
+    if need_fetch:
+        metas = {
+            m["youtube_video_id"]: m
+            for m in fetch_videos_metadata([v.youtube_video_id for v in need_fetch])
+        }
+        for video in need_fetch:
+            meta = metas.get(video.youtube_video_id)
+            if meta is None:
+                # Transient failure (bot-check / network) — leave NULL, retry later.
+                continue
+            # content_type_for_reason can be None (private/removed/…) — those
+            # aren't a media kind, so fall back to regular to mark them handled.
+            video.content_type = meta.get("content_type") or REGULAR
+            # Self-heal the reason too if the extraction revealed one.
+            if meta.get("unplayable_reason"):
+                video.unplayable_reason = meta["unplayable_reason"]
+
+    classified = sum(1 for v in null_videos if v.content_type is not None)
+    db.commit()
+    return {"discovered": discovered, "classified": classified}
 
 
 def ingest_pushed_videos(
