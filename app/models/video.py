@@ -47,6 +47,12 @@ class Video(Base):
     # instant-stream attempt hits a video-inherent refusal; cleared whenever an
     # attempt later succeeds. NULL = playable as far as we know.
     unplayable_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # What kind of media this is (regular, short, live, premiere, age_restricted,
+    # members_only, premium — see app/utils/content_type.py). Assigned at catalog
+    # time from yt-dlp metadata; unlike unplayable_reason it's a stable label that
+    # does NOT self-heal, so clients badge it and gate it per channel. NULL for
+    # rows cataloged before this column existed (treated as regular).
+    content_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
     downloaded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # Liveness signal for an in-flight download: set when the row enters
     # DOWNLOADING and refreshed by the worker as yt-dlp produces output. The

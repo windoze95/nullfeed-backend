@@ -18,6 +18,10 @@ class VideoOut(BaseModel):
     # private, geo_blocked, removed, drm, upcoming, unavailable), or None when
     # playable as far as we know. Clients render this as a banner.
     unplayable_reason: str | None = None
+    # What kind of media this is (regular, short, live, premiere, age_restricted,
+    # members_only, premium), or None for rows cataloged before the field
+    # existed. Clients badge it and gate it per channel.
+    content_type: str | None = None
     thumbnail_url: str | None = None
     watch_position_seconds: int = 0
     is_watched: bool = False

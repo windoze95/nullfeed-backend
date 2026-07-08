@@ -1,3 +1,6 @@
+# Cloudflare Wrangler / Pages local cache (marketing site tooling)
+.wrangler/
+
 # Python
 __pycache__/
 *.py[cod]

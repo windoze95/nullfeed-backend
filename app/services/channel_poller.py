@@ -262,6 +262,7 @@ def _catalog_videos(
             uploaded_at=uploaded_at,
             status="CATALOGED",
             unplayable_reason=reason,
+            content_type=yt_vid.get("content_type"),
             created_at=poll_started_at - timedelta(seconds=index),
         )
         db.add(video)
