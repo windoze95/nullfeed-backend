@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, not_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.api.auth import get_current_user
 from app.database import get_db
@@ -12,8 +13,34 @@ from app.models.video import Video
 from app.schemas.channel import ChannelOut
 from app.schemas.feed import FeedItem, HomeFeed
 from app.schemas.video import VideoOut
+from app.utils.content_type import REGULAR
 
 router = APIRouter(prefix="/api/feed", tags=["feed"])
+
+
+async def _subscriptions(user: User, db: AsyncSession) -> list[tuple[str, list | None]]:
+    """This user's (channel_id, hidden_content_types) subscription rows."""
+    result = await db.execute(
+        select(
+            UserSubscription.channel_id, UserSubscription.hidden_content_types
+        ).where(UserSubscription.user_id == user.id)
+    )
+    return [(channel_id, hidden) for channel_id, hidden in result.all()]
+
+
+def _content_gate(subs: list[tuple[str, list | None]]) -> ColumnElement | None:
+    """A WHERE condition dropping videos whose content_type is hidden for their
+    channel (the per-channel gate applied to feeds). None when nothing is hidden.
+    A NULL content_type counts as ``regular``, matching the channel-list gate."""
+    hidden_conds = [
+        and_(
+            Video.channel_id == channel_id,
+            func.coalesce(Video.content_type, REGULAR).in_(hidden),
+        )
+        for channel_id, hidden in subs
+        if hidden
+    ]
+    return not_(or_(*hidden_conds)) if hidden_conds else None
 
 
 def _channel_out(channel: Channel) -> ChannelOut:
@@ -84,12 +111,11 @@ async def _new_episodes_items(
 ) -> list[FeedItem]:
     """Newest unwatched download per subscribed channel for this user."""
     # Get user's subscribed channel IDs
-    sub_result = await db.execute(
-        select(UserSubscription.channel_id).where(UserSubscription.user_id == user.id)
-    )
-    subscribed_ids = [row[0] for row in sub_result.all()]
+    subs = await _subscriptions(user, db)
+    subscribed_ids = [cid for cid, _ in subs]
     if not subscribed_ids:
         return []
+    gate = _content_gate(subs)
 
     # Rank each unwatched, completed video within its channel so the dedup-to-
     # newest-per-channel happens in SQL. The window function runs over the
@@ -98,6 +124,15 @@ async def _new_episodes_items(
     # Pushing this into the DB keeps latency tied to ``limit`` rather than the
     # size of the subscribed library (the old code loaded every such row and
     # deduped in Python).
+    ranked_where = [
+        UserVideoRef.user_id == user.id,
+        UserVideoRef.removed_at.is_(None),
+        UserVideoRef.is_watched == False,  # noqa: E712
+        Video.channel_id.in_(subscribed_ids),
+    ]
+    if gate is not None:
+        # Rank over the gated set so rank 1 is the newest *non-hidden* episode.
+        ranked_where.append(gate)
     ranked = (
         select(
             Video.id.label("video_id"),
@@ -109,12 +144,7 @@ async def _new_episodes_items(
             .label("rn"),
         )
         .join(UserVideoRef, UserVideoRef.video_id == Video.id)
-        .where(
-            UserVideoRef.user_id == user.id,
-            UserVideoRef.removed_at.is_(None),
-            UserVideoRef.is_watched == False,  # noqa: E712
-            Video.channel_id.in_(subscribed_ids),
-        )
+        .where(*ranked_where)
         .subquery()
     )
 
@@ -148,22 +178,24 @@ async def _recently_added_items(
     Episode-based and cache-agnostic: a new upload shows here as soon as it's
     cataloged, whether or not it has been cached yet.
     """
-    sub_result = await db.execute(
-        select(UserSubscription.channel_id).where(UserSubscription.user_id == user.id)
-    )
-    subscribed_ids = [row[0] for row in sub_result.all()]
+    subs = await _subscriptions(user, db)
+    subscribed_ids = [cid for cid, _ in subs]
     if not subscribed_ids:
         return []
+    gate = _content_gate(subs)
 
+    recent_where = [
+        UserVideoRef.user_id == user.id,
+        UserVideoRef.removed_at.is_(None),
+        Video.channel_id.in_(subscribed_ids),
+    ]
+    if gate is not None:
+        recent_where.append(gate)
     result = await db.execute(
         select(UserVideoRef, Video, Channel)
         .join(Video, UserVideoRef.video_id == Video.id)
         .join(Channel, Video.channel_id == Channel.id)
-        .where(
-            UserVideoRef.user_id == user.id,
-            UserVideoRef.removed_at.is_(None),
-            Video.channel_id.in_(subscribed_ids),
-        )
+        .where(*recent_where)
         .order_by(
             func.coalesce(Video.uploaded_at, Video.created_at).desc(),
             Video.id.desc(),
