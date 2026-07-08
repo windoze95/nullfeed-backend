@@ -475,6 +475,12 @@ async def get_channel(
     if sub:
         detail.tracking_mode = sub.tracking_mode
         detail.hidden_content_types = sub.hidden_content_types or []
+    types_result = await db.execute(
+        select(func.coalesce(Video.content_type, REGULAR))
+        .where(Video.channel_id == channel_id)
+        .distinct()
+    )
+    detail.available_content_types = sorted(t for (t,) in types_result.all())
     return detail
 
 
