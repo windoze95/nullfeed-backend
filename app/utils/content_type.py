@@ -29,6 +29,13 @@ AGE_RESTRICTED = "age_restricted"
 MEMBERS_ONLY = "members_only"
 PREMIUM = "premium"
 
+# Types cataloged for visibility but never auto-downloaded or announced as new
+# episodes by default: auto-pulling every discovered Short and multi-hour
+# livestream is exactly what would flood storage, so they stay hands-off until a
+# per-channel gate opts them in. Access-walled types already sit out downloads
+# via unplayable_reason, and premieres via their SOFT upcoming reason.
+CATALOG_ONLY_TYPES = frozenset({SHORT, LIVE})
+
 # Longest a video can be and still count as a Short by the duration fallback
 # (YouTube caps Shorts at 60s; a second of slack for rounding). Only consulted
 # when nothing already marked it a Short.

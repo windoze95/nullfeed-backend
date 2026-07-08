@@ -14,7 +14,11 @@ from collections.abc import Callable
 import httpx
 
 from app.config import settings
-from app.utils.content_type import classify_content_type, content_type_for_reason
+from app.utils.content_type import (
+    REGULAR,
+    classify_content_type,
+    content_type_for_reason,
+)
 from app.utils.unplayable import (
     UnplayableVideoError,
     classify_entry,
@@ -780,6 +784,67 @@ def fetch_channel_videos(
         logger.warning("Failed to fetch videos for %s: %s", youtube_channel_id, e)
 
     return {"videos": videos, "channel_meta": channel_meta}
+
+
+def fetch_channel_tab(
+    youtube_channel_id: str,
+    tab: str,
+    default_type: str,
+    max_videos: int | None = None,
+) -> list[dict]:
+    """Flat-scan one of a channel's secondary tabs (``/shorts``, ``/streams``) for
+    video entries, in the shape ``_catalog_videos`` consumes.
+
+    The main /videos tab excludes Shorts and livestreams entirely, so these tabs
+    are the only way they get discovered. Each entry's ``content_type`` is the
+    per-entry classification, falling back to ``default_type`` (short for
+    /shorts, live for /streams) when a flat entry classifies as plain ``regular``
+    — the tab itself is authoritative that its videos are Shorts/livestreams even
+    though a flat entry lacks the aspect/live-status signals to prove it. Access
+    walls (members/premium/age) still win. A channel without the tab, or any
+    fetch error, just yields an empty list.
+    """
+    if max_videos is None:
+        max_videos = settings.catalog_fetch_count
+    url = _build_channel_url(youtube_channel_id, tab)
+
+    cmd = [
+        "yt-dlp",
+        "--flat-playlist",
+        "--dump-json",
+        "--playlist-items",
+        f"1:{max_videos}",
+        url,
+    ]
+
+    entries: list[dict] = []
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode != 0:
+            return entries
+        for line in result.stdout.strip().split("\n"):
+            if not line.strip():
+                continue
+            data = json.loads(line)
+            vid = data.get("id", "")
+            if not vid:
+                continue
+            classified = classify_content_type(data)
+            entries.append(
+                {
+                    "youtube_video_id": vid,
+                    "title": data.get("title", ""),
+                    "duration_seconds": int(data.get("duration") or 0),
+                    "upload_date": data.get("upload_date"),
+                    "unplayable_reason": classify_entry(data),
+                    "content_type": (
+                        classified if classified != REGULAR else default_type
+                    ),
+                }
+            )
+    except Exception as e:
+        logger.warning("Failed to fetch %s for %s: %s", tab, youtube_channel_id, e)
+    return entries
 
 
 def _parse_rss_entries(xml_text: str) -> list[dict]:

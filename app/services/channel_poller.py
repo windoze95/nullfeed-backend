@@ -13,11 +13,13 @@ from app.services.download_manager import (
     fetch_channel_images,
     fetch_channel_metadata,
     fetch_channel_rss,
+    fetch_channel_tab,
     fetch_channel_videos,
     fetch_videos_metadata,
 )
 from app.services.progress_broadcaster import publish_new_episode
 from app.services.push_gateway import send_to_users
+from app.utils.content_type import CATALOG_ONLY_TYPES, LIVE, REGULAR, SHORT
 from app.utils.time import utcnow_naive
 from app.utils.unplayable import SOFT_REASONS
 
@@ -29,6 +31,34 @@ def _as_naive_utc(value: datetime | None) -> datetime | None:
     if value is not None and value.tzinfo is not None:
         return value.astimezone(timezone.utc).replace(tzinfo=None)
     return value
+
+
+def _merge_tab_entries(*entry_lists: list[dict]) -> list[dict]:
+    """Merge video entries from several channel tabs, deduped by video id.
+
+    A video can appear in more than one tab — a past livestream is listed under
+    both /streams and /videos — so an id is kept once, in the order of the first
+    list it appeared in (the /videos feed leads, preserving its chronology). Its
+    ``content_type`` is upgraded from a later tab when that tab knows a more
+    specific kind (e.g. /streams tagging a cross-listed video ``live`` where the
+    flat /videos entry only saw ``regular``).
+    """
+    merged: dict[str, dict] = {}
+    order: list[str] = []
+    for entries in entry_lists:
+        for entry in entries:
+            vid = entry.get("youtube_video_id")
+            if not vid:
+                continue
+            existing = merged.get(vid)
+            if existing is None:
+                merged[vid] = dict(entry)
+                order.append(vid)
+            elif existing.get("content_type") in (None, REGULAR) and entry.get(
+                "content_type"
+            ) not in (None, REGULAR):
+                existing["content_type"] = entry["content_type"]
+    return [merged[vid] for vid in order]
 
 
 def _reschedule_channel(channel: Channel, *, found_new: bool) -> None:
@@ -140,13 +170,21 @@ def poll_single_channel(channel_id: str, db: Session) -> dict:
     if not had_initial_poll:
         # First-ever poll: ingest the back catalog via a full yt-dlp listing.
         # The RSS feed only exposes the ~15 newest uploads, so using it here
-        # would permanently skip older videos.
-        yt_videos = fetch_channel_videos(channel.youtube_channel_id)["videos"]
+        # would permanently skip older videos. The main /videos tab also excludes
+        # Shorts and livestreams, so scan those tabs too and merge — discovering
+        # them is the point (they're cataloged for visibility + per-channel
+        # gating, but kept catalog-only so they never flood auto-download).
+        cid = channel.youtube_channel_id
+        yt_videos = _merge_tab_entries(
+            fetch_channel_videos(cid)["videos"],
+            fetch_channel_tab(cid, "/shorts", SHORT),
+            fetch_channel_tab(cid, "/streams", LIVE),
+        )
     else:
         # Routine poll: cheap RSS conditional GET. Only genuinely-new video IDs
         # fall through to yt-dlp for full metadata.
-        yt_videos = _discover_routine(channel, db)
-        if yt_videos is None:
+        discovered = _discover_routine(channel, db)
+        if discovered is None:
             # 304 Not Modified, or the feed surfaced no unseen videos: nothing
             # to catalog. Record the poll and, since it was empty, widen the
             # cadence toward the cap. _discover_routine refreshed any validators
@@ -155,6 +193,7 @@ def poll_single_channel(channel_id: str, db: Session) -> dict:
             _reschedule_channel(channel, found_new=False)
             db.commit()
             return {"cataloged_ids": [], "auto_download_ids": []}
+        yt_videos = discovered
 
     # The routine poll updates last_checked_at and the adaptive cadence as part
     # of the catalog commit; the initial poll only catalogs (no prior schedule).
@@ -244,13 +283,16 @@ def _catalog_videos(
             except (ValueError, TypeError):
                 pass
 
-        # A video-inherent refusal known at discovery time (members-only /
-        # premium badge, unaired premiere, or a classified extraction failure).
-        # Hard reasons never auto-download (it can't succeed) and stay out of
-        # new-episode pushes (notifying about unwatchable content is noise) —
-        # the labeled row in the feed is the visibility.
+        # Cataloged for visibility but kept out of auto-download and new-episode
+        # pushes. Two reasons: a video-inherent refusal known at discovery time
+        # (members-only / premium badge, or a classified extraction failure —
+        # fetching can't succeed, and notifying about unwatchable content is
+        # noise); or a Short / livestream, discovered so the viewer can see and
+        # gate them but never auto-pulled, since every clip and multi-hour stream
+        # would flood storage. The labeled row in the feed is the visibility.
         reason = yt_vid.get("unplayable_reason")
         hard_blocked = bool(reason) and reason not in SOFT_REASONS
+        catalog_only = hard_blocked or yt_vid.get("content_type") in CATALOG_ONLY_TYPES
 
         # Create new video record as CATALOGED (not PENDING)
         video = Video(
@@ -271,10 +313,10 @@ def _catalog_videos(
         id_by_ytid[yt_video_id] = video.id
 
         video_ids_for_refs.append(video.id)
-        if not hard_blocked:
+        if not catalog_only:
             new_video_ids.append(video.id)
         cataloged_ids.append(video.id)
-        if not hard_blocked:
+        if not catalog_only:
             new_videos_for_events.append(
                 {
                     "id": video.id,
