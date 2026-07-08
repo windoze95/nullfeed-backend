@@ -15,10 +15,13 @@ from app.models.channel import Channel
 from app.models.subscription import UserSubscription
 from app.models.video import Video
 from app.services.channel_poller import (
+    RECONCILE_CHANNELS_PER_RUN,
     _backoff_failed_channel,
+    channels_needing_reconcile,
     ingest_pushed_videos,
     list_channel_ids_to_poll,
     poll_single_channel,
+    reconcile_channel_content,
     refresh_stale_channel_metadata,
 )
 from app.services.download_manager import (
@@ -129,6 +132,59 @@ def poll_channel_task(self, channel_id: str) -> dict:
         logger.exception("Error polling channel %s", channel_id)
         db.rollback()
         _backoff_failed_channel(channel_id, db)
+        return {"status": "error"}
+    finally:
+        db.close()
+
+
+@celery_app.task(
+    name="app.tasks.download_tasks.reconcile_content_task",
+    bind=True,
+    max_retries=0,
+)
+def reconcile_content_task(self) -> dict:
+    """Periodic: sweep the back catalog into the content-type model.
+
+    Enumerates a few channels that still have content_type-NULL videos and fans
+    out one isolated per-channel reconcile job each (same shape as the poll
+    fan-out). Cheap and self-limiting — it winds down to a no-op once everything
+    has been discovered + classified, and only ramps back up when a subscription
+    is added or old rows resurface.
+    """
+    db = _get_sync_db()
+    try:
+        channel_ids = channels_needing_reconcile(db, RECONCILE_CHANNELS_PER_RUN)
+    except Exception:
+        logger.exception("Error enumerating channels to reconcile")
+        return {"status": "error"}
+    finally:
+        db.close()
+
+    if not channel_ids:
+        return {"status": "ok", "dispatched": 0}
+
+    group(
+        reconcile_channel_content_task.s(channel_id) for channel_id in channel_ids
+    ).apply_async()
+    logger.info("Dispatched %d content-reconcile jobs", len(channel_ids))
+    return {"status": "ok", "dispatched": len(channel_ids)}
+
+
+@celery_app.task(
+    name="app.tasks.download_tasks.reconcile_channel_content_task",
+    bind=True,
+    max_retries=0,
+)
+def reconcile_channel_content_task(self, channel_id: str) -> dict:
+    """Discover + classify one channel's back catalog, on its own DB session so a
+    slow/stuck channel can't affect the others."""
+    db = _get_sync_db()
+    try:
+        result = reconcile_channel_content(channel_id, db)
+        return {"status": "ok", **result}
+    except Exception:
+        logger.exception("Error reconciling channel content %s", channel_id)
+        db.rollback()
         return {"status": "error"}
     finally:
         db.close()
