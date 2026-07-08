@@ -190,6 +190,7 @@ async def search_videos(
             status=video.status,
             preview_status=video.preview_status,
             unplayable_reason=video.unplayable_reason,
+            content_type=video.content_type,
             thumbnail_url=f"/data/thumbnails/{video.youtube_video_id}.jpg",
             watch_position_seconds=ref.watch_position_seconds,
             is_watched=ref.is_watched,
@@ -250,6 +251,7 @@ async def get_active_downloads(
             status=v.status,
             preview_status=v.preview_status,
             unplayable_reason=v.unplayable_reason,
+            content_type=v.content_type,
             thumbnail_url=f"/data/thumbnails/{v.youtube_video_id}.jpg",
             channel_name=v.channel.name if v.channel else "",
         )
@@ -342,6 +344,7 @@ async def get_video(
         status=video.status,
         preview_status=video.preview_status,
         unplayable_reason=video.unplayable_reason,
+        content_type=video.content_type,
         thumbnail_url=f"/data/thumbnails/{video.youtube_video_id}.jpg",
         watch_position_seconds=ref.watch_position_seconds if ref else 0,
         is_watched=ref.is_watched if ref else False,

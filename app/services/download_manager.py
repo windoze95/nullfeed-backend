@@ -14,6 +14,7 @@ from collections.abc import Callable
 import httpx
 
 from app.config import settings
+from app.utils.content_type import classify_content_type, content_type_for_reason
 from app.utils.unplayable import (
     UnplayableVideoError,
     classify_entry,
@@ -758,6 +759,7 @@ def fetch_channel_videos(
                         # membership/premium/upcoming videos get labeled at
                         # catalog time instead of on their first failed fetch.
                         "unplayable_reason": classify_entry(data),
+                        "content_type": classify_content_type(data),
                     }
                 )
                 # Extract channel metadata from the first entry
@@ -924,6 +926,7 @@ def fetch_videos_metadata(
                     # Extraction succeeded, but the availability badges can
                     # still say the media itself is gated (members/premium).
                     "unplayable_reason": classify_entry(data),
+                    "content_type": classify_content_type(data),
                 }
         if result.returncode != 0:
             for err_line in (result.stderr or "").splitlines():
@@ -951,6 +954,9 @@ def fetch_videos_metadata(
             "duration_seconds": 0,
             "upload_date": None,
             "unplayable_reason": reason,
+            # No metadata to classify from (extraction failed); derive the type
+            # from the reason where it maps (members/premium/age/premiere).
+            "content_type": content_type_for_reason(reason),
         }
 
     # Preserve the requested (newest-first) order; drop any that didn't resolve.
