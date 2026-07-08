@@ -32,6 +32,9 @@ class ChannelDetail(ChannelOut):
     # Content types this user has hidden for this channel (empty when nothing is
     # hidden or the user isn't subscribed). Backs the per-channel filter menu.
     hidden_content_types: list[str] = Field(default_factory=list)
+    # The distinct content types this channel actually has cataloged, so the
+    # filter menu only offers toggles for types that exist here (NULL → regular).
+    available_content_types: list[str] = Field(default_factory=list)
 
 
 class ContentFilterUpdate(BaseModel):

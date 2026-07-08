@@ -130,3 +130,15 @@ async def test_empty_filter_clears(client, make_user):
     assert resp.json()["hidden_content_types"] == []
     resp = await client.get(f"/api/channels/{cid}/videos", headers=headers)
     assert len(resp.json()["items"]) == 3
+
+
+async def test_channel_detail_reports_available_content_types(client, make_user):
+    user, headers = await make_user()
+    cid = await _seed_channel_with_videos(user["id"])  # regular, short, live
+    resp = await client.get(f"/api/channels/{cid}", headers=headers)
+    # Only the types this channel actually has — the filter menu offers just these.
+    assert sorted(resp.json()["available_content_types"]) == [
+        "live",
+        "regular",
+        "short",
+    ]
