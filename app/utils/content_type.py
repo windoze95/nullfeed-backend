@@ -45,18 +45,18 @@ CATALOG_ONLY_TYPES = frozenset({SHORT, LIVE})
 
 # Content types hidden for a channel *by default* — applied only when the viewer
 # hasn't explicitly configured that channel's filter (its stored hidden set is
-# NULL). Members-only content can't be played here anyway, so it stays out of the
-# way until the viewer opts to show it per channel. Any explicitly stored set
-# (even an empty one — "show everything") overrides this; see
-# effective_hidden_content_types.
-DEFAULT_HIDDEN_CONTENT_TYPES = (MEMBERS_ONLY,)
+# NULL). The access walls the server can't fetch anyway (members-only = channel
+# membership, premium = YouTube Premium / paid-rental) stay out of the way until
+# the viewer opts to show them per channel. Any explicitly stored set (even an
+# empty one — "show everything") overrides this; see effective_hidden_content_types.
+DEFAULT_HIDDEN_CONTENT_TYPES = (MEMBERS_ONLY, PREMIUM)
 
 
 def effective_hidden_content_types(stored: list | None) -> list[str]:
     """The content types actually hidden for a channel. A stored value is used
     as-is — including an empty list, i.e. the viewer explicitly showing
     everything; NULL means the channel was never configured, so the global
-    default (members-only) applies."""
+    default (members-only + premium) applies."""
     return list(DEFAULT_HIDDEN_CONTENT_TYPES) if stored is None else stored
 
 
