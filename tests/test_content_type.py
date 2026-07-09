@@ -109,9 +109,9 @@ def test_content_type_for_reason_ignores_non_media_reasons():
         assert content_type_for_reason(reason) is None
 
 
-def test_effective_hidden_content_types_applies_members_only_default():
-    # Unconfigured (NULL) → the members-only default.
-    assert effective_hidden_content_types(None) == [MEMBERS_ONLY]
+def test_effective_hidden_content_types_applies_default():
+    # Unconfigured (NULL) → the default access walls (members-only + premium).
+    assert effective_hidden_content_types(None) == [MEMBERS_ONLY, PREMIUM]
     # An explicit set is used as-is, including empty ("show everything").
     assert effective_hidden_content_types([]) == []
     assert effective_hidden_content_types([SHORT]) == [SHORT]

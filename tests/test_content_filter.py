@@ -132,7 +132,7 @@ async def test_empty_filter_clears(client, make_user):
     assert len(resp.json()["items"]) == 3
 
 
-async def test_members_only_hidden_by_default(client, make_user):
+async def test_access_walls_hidden_by_default(client, make_user):
     user, headers = await make_user()
     async with async_session_factory() as db:
         channel = await seed_channel(db)
@@ -141,20 +141,25 @@ async def test_members_only_hidden_by_default(client, make_user):
         await seed_subscription(db, user["id"], cid)
         await seed_video(db, channel, title="Regular", content_type="regular")
         await seed_video(db, channel, title="Members", content_type="members_only")
+        await seed_video(db, channel, title="Premium", content_type="premium")
 
-    # Members-only is hidden without the viewer configuring anything.
+    # Members-only and premium are hidden without the viewer configuring anything.
     resp = await client.get(f"/api/channels/{cid}/videos", headers=headers)
     assert {v["title"] for v in resp.json()["items"]} == {"Regular"}
 
-    # The channel detail surfaces the default so the menu shows it unchecked.
+    # The channel detail surfaces the default so the menu shows them unchecked.
     resp = await client.get(f"/api/channels/{cid}", headers=headers)
-    assert resp.json()["hidden_content_types"] == ["members_only"]
+    assert resp.json()["hidden_content_types"] == ["members_only", "premium"]
 
     # The reveal override still shows everything.
     resp = await client.get(
         f"/api/channels/{cid}/videos?include_hidden=true", headers=headers
     )
-    assert {v["title"] for v in resp.json()["items"]} == {"Regular", "Members"}
+    assert {v["title"] for v in resp.json()["items"]} == {
+        "Regular",
+        "Members",
+        "Premium",
+    }
 
 
 async def test_explicit_show_all_overrides_members_only_default(client, make_user):
