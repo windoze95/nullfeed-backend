@@ -132,6 +132,52 @@ async def test_empty_filter_clears(client, make_user):
     assert len(resp.json()["items"]) == 3
 
 
+async def test_members_only_hidden_by_default(client, make_user):
+    user, headers = await make_user()
+    async with async_session_factory() as db:
+        channel = await seed_channel(db)
+        cid = channel.id
+        # Subscribed but the filter is never configured (NULL) → default applies.
+        await seed_subscription(db, user["id"], cid)
+        await seed_video(db, channel, title="Regular", content_type="regular")
+        await seed_video(db, channel, title="Members", content_type="members_only")
+
+    # Members-only is hidden without the viewer configuring anything.
+    resp = await client.get(f"/api/channels/{cid}/videos", headers=headers)
+    assert {v["title"] for v in resp.json()["items"]} == {"Regular"}
+
+    # The channel detail surfaces the default so the menu shows it unchecked.
+    resp = await client.get(f"/api/channels/{cid}", headers=headers)
+    assert resp.json()["hidden_content_types"] == ["members_only"]
+
+    # The reveal override still shows everything.
+    resp = await client.get(
+        f"/api/channels/{cid}/videos?include_hidden=true", headers=headers
+    )
+    assert {v["title"] for v in resp.json()["items"]} == {"Regular", "Members"}
+
+
+async def test_explicit_show_all_overrides_members_only_default(client, make_user):
+    user, headers = await make_user()
+    async with async_session_factory() as db:
+        channel = await seed_channel(db)
+        cid = channel.id
+        await seed_subscription(db, user["id"], cid)
+        await seed_video(db, channel, title="Members", content_type="members_only")
+
+    # Explicitly showing everything (empty set) overrides the default.
+    resp = await client.put(
+        f"/api/channels/{cid}/content-filter",
+        json={"hidden_content_types": []},
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["hidden_content_types"] == []
+
+    resp = await client.get(f"/api/channels/{cid}/videos", headers=headers)
+    assert {v["title"] for v in resp.json()["items"]} == {"Members"}
+
+
 async def test_channel_detail_reports_available_content_types(client, make_user):
     user, headers = await make_user()
     cid = await _seed_channel_with_videos(user["id"])  # regular, short, live

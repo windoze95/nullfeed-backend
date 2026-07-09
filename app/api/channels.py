@@ -27,7 +27,11 @@ from app.schemas.channel import (
 from app.schemas.video import VideoOut, VideoPagination
 from app.services.channel_poller import poll_single_channel
 from app.services.download_manager import fetch_channel_images, fetch_channel_metadata
-from app.utils.content_type import ALL_CONTENT_TYPES, REGULAR
+from app.utils.content_type import (
+    ALL_CONTENT_TYPES,
+    REGULAR,
+    effective_hidden_content_types,
+)
 from app.tasks.download_tasks import (
     _get_sync_db,
     download_video_task,
@@ -413,7 +417,9 @@ async def refresh_channel_images(
     detail.is_subscribed = sub is not None
     if sub:
         detail.tracking_mode = sub.tracking_mode
-        detail.hidden_content_types = sub.hidden_content_types or []
+        detail.hidden_content_types = effective_hidden_content_types(
+            sub.hidden_content_types
+        )
     return detail
 
 
@@ -474,7 +480,9 @@ async def get_channel(
     detail.is_subscribed = sub is not None
     if sub:
         detail.tracking_mode = sub.tracking_mode
-        detail.hidden_content_types = sub.hidden_content_types or []
+        detail.hidden_content_types = effective_hidden_content_types(
+            sub.hidden_content_types
+        )
     types_result = await db.execute(
         select(func.coalesce(Video.content_type, REGULAR))
         .where(Video.channel_id == channel_id)
@@ -512,24 +520,27 @@ async def set_content_filter(
     if sub is None:
         raise HTTPException(status_code=404, detail="Not subscribed to this channel")
 
-    # Dedup and store None when empty so "nothing hidden" is a clean NULL.
-    hidden = list(dict.fromkeys(body.hidden_content_types))
-    sub.hidden_content_types = hidden or None
+    # Store the explicit set as given (deduped) — including an empty list, which
+    # means "show everything" and must override the members-only default, so it's
+    # kept distinct from NULL ("never configured", where the default applies).
+    sub.hidden_content_types = list(dict.fromkeys(body.hidden_content_types))
     await db.commit()
 
     return await get_channel(channel_id, user=user, db=db)
 
 
 async def _hidden_types_for(channel_id: str, user: User, db: AsyncSession) -> list[str]:
-    """The content types this user has hidden for a channel (empty if none / not
-    subscribed) — the gate applied to the channel's video list and feeds."""
+    """The content types effectively hidden for a channel — the gate applied to
+    its video list. An unconfigured channel (no stored set / not subscribed)
+    falls back to the members-only default; an explicit set (even empty) is used
+    as-is. See effective_hidden_content_types."""
     result = await db.execute(
         select(UserSubscription.hidden_content_types).where(
             UserSubscription.user_id == user.id,
             UserSubscription.channel_id == channel_id,
         )
     )
-    return result.scalar_one_or_none() or []
+    return effective_hidden_content_types(result.scalar_one_or_none())
 
 
 @router.get("/{channel_id}/videos", response_model=VideoPagination)
