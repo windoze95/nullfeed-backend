@@ -62,8 +62,14 @@ _UPSTREAM_USER_AGENT = (
 )
 
 # Response headers worth forwarding from the source so the client gets correct
-# length/range/type metadata for seeking.
-_FORWARDED_HEADERS = ("content-length", "content-range", "content-type")
+# length/range/type metadata for seeking. accept-ranges is only trusted as-is
+# on a plain (no client Range) request — see stream_proxy.
+_FORWARDED_HEADERS = (
+    "accept-ranges",
+    "content-length",
+    "content-range",
+    "content-type",
+)
 
 # video_id -> (url, expiry_epoch). Per-process; each worker resolves once and
 # reuses. Cleared between tests via conftest's reset fixture.
@@ -178,8 +184,12 @@ async def stream_proxy(url: str, range_header: str | None) -> StreamingResponse:
 
     The source's status (200/206), Content-Length, Content-Range and
     Content-Type are passed through so the client's player can seek normally.
-    The client and upstream response are closed when the body is fully streamed
-    (or the client disconnects and the generator is torn down).
+    Accept-Ranges is only advertised as ``bytes`` when the upstream actually
+    honored the Range request (206); if the client sent a Range and got a full
+    200 body back, ``Accept-Ranges: none`` is sent so the player doesn't stall
+    a seek waiting for the sequential download to catch up. The client and
+    upstream response are closed when the body is fully streamed (or the
+    client disconnects and the generator is torn down).
     """
     req_headers = {"User-Agent": _UPSTREAM_USER_AGENT}
     if range_header:
@@ -201,7 +211,23 @@ async def stream_proxy(url: str, range_header: str | None) -> StreamingResponse:
         for key in _FORWARDED_HEADERS
         if key in upstream.headers
     }
-    out_headers["Accept-Ranges"] = "bytes"
+    if upstream.status_code == 206:
+        # Upstream honored the Range request, so seeking works through this
+        # path; Content-Range was forwarded above.
+        out_headers["accept-ranges"] = "bytes"
+    else:
+        # Not a range response; a stray Content-Range would be malformed here.
+        out_headers.pop("content-range", None)
+        if range_header:
+            # The client asked for a range and the upstream sent the full body
+            # instead. Advertising range support anyway makes the player treat
+            # a seek as satisfiable and stall until the sequential download
+            # catches up — declare "none" so it doesn't try. Upstream's own
+            # accept-ranges claim (forwarded above) is overridden: demonstrated
+            # behavior wins.
+            out_headers["accept-ranges"] = "none"
+        # Without a client Range a 200 proves nothing either way, so upstream's
+        # own accept-ranges advertisement (if any) is left as forwarded.
     media_type = upstream.headers.get("content-type", "video/mp4")
 
     async def body():

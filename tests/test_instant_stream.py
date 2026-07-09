@@ -86,6 +86,101 @@ async def test_resolve_failure_raises(monkeypatch):
         instant_stream.resolve_progressive_url("vid-2")
 
 
+# --- stream_proxy Accept-Ranges semantics ----------------------------------
+
+
+async def _drain(resp) -> bytes:
+    """Consume a StreamingResponse body (also tears down the proxy's client)."""
+    return b"".join([chunk async for chunk in resp.body_iterator])
+
+
+async def test_stream_proxy_206_advertises_ranges(monkeypatch):
+    body = bytes(i % 256 for i in range(1000))
+    monkeypatch.setattr(instant_stream, "_make_client", _mock_client_factory(body))
+
+    resp = await instant_stream.stream_proxy(
+        "https://upstream.test/v.mp4", "bytes=0-99"
+    )
+
+    assert resp.status_code == 206
+    assert resp.headers["accept-ranges"] == "bytes"
+    assert resp.headers["content-range"] == "bytes 0-99/1000"
+    assert await _drain(resp) == body[:100]
+
+
+async def test_stream_proxy_200_fallback_does_not_advertise_ranges(monkeypatch):
+    """An upstream that ignores Range and sends the full body must not leave
+    the player believing seeks work — Accept-Ranges flips to ``none`` and no
+    Content-Range leaks through."""
+    body = b"x" * 512
+
+    def ignores_range(request: httpx.Request) -> httpx.Response:
+        assert request.headers.get("range") == "bytes=0-99"  # forwarded, ignored
+
+        async def full_stream():
+            yield body
+
+        return httpx.Response(
+            200,
+            headers={
+                "Content-Length": str(len(body)),
+                "Content-Type": "video/mp4",
+                # Upstream *claims* range support while ignoring the request;
+                # the demonstrated behavior must win over the claim.
+                "Accept-Ranges": "bytes",
+            },
+            content=full_stream(),
+        )
+
+    monkeypatch.setattr(
+        instant_stream,
+        "_make_client",
+        lambda: httpx.AsyncClient(transport=httpx.MockTransport(ignores_range)),
+    )
+
+    resp = await instant_stream.stream_proxy(
+        "https://upstream.test/v.mp4", "bytes=0-99"
+    )
+
+    assert resp.status_code == 200
+    assert resp.headers["accept-ranges"] == "none"
+    assert "content-range" not in resp.headers
+    assert await _drain(resp) == body
+
+
+async def test_stream_proxy_plain_get_forwards_upstream_accept_ranges(monkeypatch):
+    """No client Range: a 200 proves nothing, so upstream's own Accept-Ranges
+    passes through when present and stays absent when it isn't."""
+    body = b"y" * 64
+
+    def with_claim(request: httpx.Request) -> httpx.Response:
+        async def full_stream():
+            yield body
+
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "video/mp4", "Accept-Ranges": "bytes"},
+            content=full_stream(),
+        )
+
+    monkeypatch.setattr(
+        instant_stream,
+        "_make_client",
+        lambda: httpx.AsyncClient(transport=httpx.MockTransport(with_claim)),
+    )
+    resp = await instant_stream.stream_proxy("https://upstream.test/v.mp4", None)
+    assert resp.status_code == 200
+    assert resp.headers["accept-ranges"] == "bytes"
+    await _drain(resp)
+
+    # _mock_client_factory's plain-200 handler sends no Accept-Ranges at all.
+    monkeypatch.setattr(instant_stream, "_make_client", _mock_client_factory(body))
+    resp = await instant_stream.stream_proxy("https://upstream.test/v.mp4", None)
+    assert resp.status_code == 200
+    assert "accept-ranges" not in resp.headers
+    await _drain(resp)
+
+
 # --- endpoint -------------------------------------------------------------
 
 
@@ -130,6 +225,7 @@ async def test_instant_stream_proxies_source(client, make_user, monkeypatch):
     )
     assert resp.status_code == 206
     assert resp.headers["Content-Range"] == "bytes 0-99/1000"
+    assert resp.headers["Accept-Ranges"] == "bytes"
     assert resp.content == body[:100]
 
 
