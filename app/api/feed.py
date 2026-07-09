@@ -13,7 +13,7 @@ from app.models.video import Video
 from app.schemas.channel import ChannelOut
 from app.schemas.feed import FeedItem, HomeFeed
 from app.schemas.video import VideoOut
-from app.utils.content_type import REGULAR
+from app.utils.content_type import REGULAR, effective_hidden_content_types
 
 router = APIRouter(prefix="/api/feed", tags=["feed"])
 
@@ -31,15 +31,19 @@ async def _subscriptions(user: User, db: AsyncSession) -> list[tuple[str, list |
 def _content_gate(subs: list[tuple[str, list | None]]) -> ColumnElement | None:
     """A WHERE condition dropping videos whose content_type is hidden for their
     channel (the per-channel gate applied to feeds). None when nothing is hidden.
-    A NULL content_type counts as ``regular``, matching the channel-list gate."""
-    hidden_conds = [
-        and_(
-            Video.channel_id == channel_id,
-            func.coalesce(Video.content_type, REGULAR).in_(hidden),
-        )
-        for channel_id, hidden in subs
-        if hidden
-    ]
+    A NULL content_type counts as ``regular``, matching the channel-list gate; a
+    NULL stored set means the channel is unconfigured, so the members-only
+    default applies (see effective_hidden_content_types)."""
+    hidden_conds = []
+    for channel_id, stored in subs:
+        hidden = effective_hidden_content_types(stored)
+        if hidden:
+            hidden_conds.append(
+                and_(
+                    Video.channel_id == channel_id,
+                    func.coalesce(Video.content_type, REGULAR).in_(hidden),
+                )
+            )
     return not_(or_(*hidden_conds)) if hidden_conds else None
 
 

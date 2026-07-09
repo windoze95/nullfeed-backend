@@ -43,6 +43,23 @@ ALL_CONTENT_TYPES = frozenset(
 # via unplayable_reason, and premieres via their SOFT upcoming reason.
 CATALOG_ONLY_TYPES = frozenset({SHORT, LIVE})
 
+# Content types hidden for a channel *by default* — applied only when the viewer
+# hasn't explicitly configured that channel's filter (its stored hidden set is
+# NULL). Members-only content can't be played here anyway, so it stays out of the
+# way until the viewer opts to show it per channel. Any explicitly stored set
+# (even an empty one — "show everything") overrides this; see
+# effective_hidden_content_types.
+DEFAULT_HIDDEN_CONTENT_TYPES = (MEMBERS_ONLY,)
+
+
+def effective_hidden_content_types(stored: list | None) -> list[str]:
+    """The content types actually hidden for a channel. A stored value is used
+    as-is — including an empty list, i.e. the viewer explicitly showing
+    everything; NULL means the channel was never configured, so the global
+    default (members-only) applies."""
+    return list(DEFAULT_HIDDEN_CONTENT_TYPES) if stored is None else stored
+
+
 # Longest a video can be and still count as a Short by the duration fallback
 # (YouTube caps Shorts at 60s; a second of slack for rounding). Only consulted
 # when nothing already marked it a Short.
