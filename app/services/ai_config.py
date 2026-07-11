@@ -2,11 +2,10 @@
 
 Lets an admin manage the discovery providers from the app instead of only via
 container env vars: the anthropic/gemini/openai API keys and the embed/rank
-provider+model selection. (The ChatGPT sign-in — the fourth rank provider —
-is stored separately in ``chatgpt_auth``.)
+provider+model selection.
 
-Storage mirrors the established runtime-secret pattern (``chatgpt_auth`` tokens,
-YouTube cookies): a single 0600 JSON file under ``settings.config_path``,
+Storage mirrors the established runtime-secret pattern (YouTube cookies, the
+push-gateway key): a single 0600 JSON file under ``settings.config_path``,
 written atomically, read fresh on every call so every uvicorn/Celery worker on
 the shared config volume sees an edit immediately.
 
@@ -39,7 +38,7 @@ def _config_path() -> Path:
 
 
 def _write_private(path: Path, data: dict) -> None:
-    """Atomic 0600 write (tmp + rename); mirrors chatgpt_auth._write_private."""
+    """Atomic 0600 write (tmp + rename); the runtime-secret file pattern."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{os.urandom(4).hex()}.tmp")
     tmp.write_text(json.dumps(data))
@@ -87,8 +86,7 @@ def _runtime_key(provider: str) -> str:
 def get_key(provider: str) -> str:
     """The effective key: runtime override if set, else the env value.
 
-    Returns "" when neither is set, and always "" for "chatgpt" (which has no
-    key — it authenticates via the ChatGPT sign-in).
+    Returns "" when neither is set (or for an unknown provider).
     """
     return _runtime_key(provider) or _env_key(provider)
 
