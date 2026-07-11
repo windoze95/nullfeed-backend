@@ -43,6 +43,20 @@ async def test_corrupt_store_falls_back_to_env(monkeypatch):
     )
 
 
+async def test_malformed_keys_field_degrades_and_is_repairable(monkeypatch):
+    # Valid JSON, but 'keys' is hand-edited to a non-dict. Reads must degrade
+    # to env, not crash, and a write must repair the store.
+    monkeypatch.setattr(settings, "gemini_api_key", "env-gemini")
+    for bad in ('{"keys": "sk-x"}', '{"keys": ["openai"]}', '{"keys": 5}'):
+        ai_config._config_path().write_text(bad)
+        assert ai_config.get_key("gemini") == "env-gemini"
+        assert ai_config.key_status("gemini")["source"] == "env"
+        # Writing repairs the malformed store rather than raising.
+        ai_config.set_key("openai", "sk-repaired")
+        assert ai_config.get_key("openai") == "sk-repaired"
+        ai_config.clear()
+
+
 async def test_selection_returned_as_a_unit(monkeypatch):
     # Env has a rank model but no provider; a runtime provider must NOT be
     # paired with the env model.

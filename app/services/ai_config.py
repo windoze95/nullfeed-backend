@@ -62,13 +62,23 @@ def _str(value: object) -> str:
     return value if isinstance(value, str) else ""
 
 
+def _dict(value: object) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def _keys(store: dict) -> dict:
+    """The store's ``keys`` sub-dict, coerced — a hand-edited file whose
+    ``keys`` is a non-dict must degrade to env, not crash the read path."""
+    return _dict(store.get("keys"))
+
+
 def _env_key(provider: str) -> str:
     attr = _ENV_KEY_ATTR.get(provider)
     return getattr(settings, attr, "") if attr else ""
 
 
 def _runtime_key(provider: str) -> str:
-    return _str((_load().get("keys") or {}).get(provider))
+    return _str(_keys(_load()).get(provider))
 
 
 # --- reads (used by llm_providers / recommendation / ad_segments) -----------
@@ -110,7 +120,7 @@ def _selection(role: str) -> tuple[str, str]:
 
 def set_key(provider: str, key: str) -> None:
     store = _load()
-    keys = dict(store.get("keys") or {})
+    keys = _keys(store)
     keys[provider] = key
     store["keys"] = keys
     _write_private(_config_path(), store)
@@ -119,7 +129,7 @@ def set_key(provider: str, key: str) -> None:
 def clear_key(provider: str) -> None:
     """Remove a runtime key, reverting that provider to its env value."""
     store = _load()
-    keys = dict(store.get("keys") or {})
+    keys = _keys(store)
     if keys.pop(provider, None) is not None:
         store["keys"] = keys
         _write_private(_config_path(), store)
