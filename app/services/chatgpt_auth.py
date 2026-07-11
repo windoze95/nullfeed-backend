@@ -71,8 +71,11 @@ class DeviceLoginError(RuntimeError):
     """The device-auth flow could not be started or completed."""
 
 
-# Serialized refresh: the lock is loop-bound, so tests reset it per loop.
+# Serialized refresh + serialized device-poll exchange. Locks are loop-bound,
+# so tests reset them per loop. These serialize WITHIN a process; cross-worker
+# safety comes from re-reading the shared store before every write.
 _refresh_lock: asyncio.Lock | None = None
+_poll_lock: asyncio.Lock | None = None
 
 
 def _get_refresh_lock() -> asyncio.Lock:
@@ -82,10 +85,18 @@ def _get_refresh_lock() -> asyncio.Lock:
     return _refresh_lock
 
 
+def _get_poll_lock() -> asyncio.Lock:
+    global _poll_lock
+    if _poll_lock is None:
+        _poll_lock = asyncio.Lock()
+    return _poll_lock
+
+
 def _reset_state() -> None:
-    """Test hook: drop the loop-bound lock between event loops."""
-    global _refresh_lock
+    """Test hook: drop the loop-bound locks between event loops."""
+    global _refresh_lock, _poll_lock
     _refresh_lock = None
+    _poll_lock = None
 
 
 def _auth_path() -> Path:
@@ -210,45 +221,81 @@ async def start_device_login() -> dict:
     }
 
 
-async def poll_device_login() -> dict:
-    """One poll attempt; the caller (admin UI) repeats until terminal."""
-    pending = _load(_pending_path())
-    if not pending:
-        return {"status": "idle"}
-    if time.time() - float(pending.get("started_at") or 0) > _DEVICE_FLOW_TTL_SECONDS:
-        _pending_path().unlink(missing_ok=True)
-        return {"status": "expired", "detail": "The device code expired; start again."}
+def _pending_response(pending: dict) -> dict:
+    return {
+        "status": "pending",
+        "user_code": pending["user_code"],
+        "verification_url": VERIFICATION_URL,
+    }
 
-    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-        resp = await client.post(
-            f"{AUTH_BASE}/api/accounts/deviceauth/token",
-            json={
-                "device_auth_id": pending["device_auth_id"],
-                "user_code": pending["user_code"],
-            },
-        )
-        # 403/404 mean "not approved yet" in this (non-RFC-8628) flow.
-        if resp.status_code in (403, 404):
-            return {
-                "status": "pending",
-                "user_code": pending["user_code"],
-                "verification_url": VERIFICATION_URL,
-            }
-        if resp.status_code >= 400:
+
+async def poll_device_login() -> dict:
+    """One poll attempt; the caller (admin UI) repeats until terminal.
+
+    Serialized in-process so two admin tabs can't both exchange the
+    single-use authorization code; across workers the exchange is guarded by
+    an atomic claim-rename of the pending file.
+    """
+    async with _get_poll_lock():
+        pending = _load(_pending_path())
+        if not pending:
+            return {"status": "idle"}
+        if (
+            time.time() - float(pending.get("started_at") or 0)
+            > _DEVICE_FLOW_TTL_SECONDS
+        ):
             _pending_path().unlink(missing_ok=True)
             return {
-                "status": "error",
-                "detail": f"Device sign-in failed (HTTP {resp.status_code}).",
+                "status": "expired",
+                "detail": "The device code expired; start again.",
             }
-        approval = resp.json()
-        token_resp = await _exchange_code(
-            client,
-            approval.get("authorization_code") or "",
-            approval.get("code_verifier") or "",
-        )
+
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            resp = await client.post(
+                f"{AUTH_BASE}/api/accounts/deviceauth/token",
+                json={
+                    "device_auth_id": pending["device_auth_id"],
+                    "user_code": pending["user_code"],
+                },
+            )
+            # 403/404 mean "not approved yet" in this (non-RFC-8628) flow.
+            if resp.status_code in (403, 404):
+                return _pending_response(pending)
+            # 429 / 5xx are transient — keep polling rather than killing the
+            # flow on a single blip.
+            if resp.status_code == 429 or resp.status_code >= 500:
+                logger.info(
+                    "ChatGPT device poll transient error %s; still pending",
+                    resp.status_code,
+                )
+                return _pending_response(pending)
+            if resp.status_code >= 400:
+                _pending_path().unlink(missing_ok=True)
+                return {
+                    "status": "error",
+                    "detail": f"Device sign-in failed (HTTP {resp.status_code}).",
+                }
+            approval = resp.json()
+
+            # Claim the pending flow atomically before exchanging: whoever
+            # wins the rename does the single-use code exchange; a racing
+            # worker finds no pending file and reports still-pending.
+            claim = _pending_path().with_name(f"{_PENDING_FILENAME}.claimed")
+            try:
+                os.replace(_pending_path(), claim)
+            except FileNotFoundError:
+                return _pending_response(pending)
+
+            try:
+                token_resp = await _exchange_code(
+                    client,
+                    approval.get("authorization_code") or "",
+                    approval.get("code_verifier") or "",
+                )
+            finally:
+                claim.unlink(missing_ok=True)
 
     _persist_tokens(token_resp)
-    _pending_path().unlink(missing_ok=True)
     record = _load(_auth_path()) or {}
     logger.info("ChatGPT sign-in completed (account %s)", record.get("account_id"))
     return {"status": "connected", "account_id": record.get("account_id")}
@@ -315,15 +362,22 @@ async def get_access_credentials(
         return None
     if not force_refresh and _is_fresh(record):
         return _credentials_from(record)
+    # The token the caller's 401 was on; used to detect a concurrent refresh.
+    seen_access = record.get("access_token")
 
     async with _get_refresh_lock():
-        # Another coroutine may have refreshed while we waited.
+        # Another coroutine (or worker) may have refreshed while we waited.
         record = _load(_auth_path())
         if not record or not record.get("refresh_token") or record.get("needs_reauth"):
             return None
-        if not force_refresh and _is_fresh(record):
+        if _is_fresh(record) and (
+            not force_refresh or record.get("access_token") != seen_access
+        ):
+            # Fresh AND (not forced, or someone rotated since our 401) — use it
+            # instead of burning another single-use refresh token.
             return _credentials_from(record)
 
+        attempted_rt = record["refresh_token"]
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             # JSON body, not form-encoded — matches codex-rs exactly.
             resp = await client.post(
@@ -331,7 +385,7 @@ async def get_access_credentials(
                 json={
                     "client_id": CLIENT_ID,
                     "grant_type": "refresh_token",
-                    "refresh_token": record["refresh_token"],
+                    "refresh_token": attempted_rt,
                 },
             )
         if resp.status_code >= 400:
@@ -340,16 +394,30 @@ async def get_access_credentials(
                 detail = (resp.json() or {}).get("error") or ""
             except (json.JSONDecodeError, ValueError):
                 detail = resp.text[:100]
-            if resp.status_code in (400, 401, 403) and (
-                not detail or any(code in str(detail) for code in _REAUTH_ERROR_CODES)
-            ):
+            # Only an EXPLICIT dead-token code means re-auth. An empty or
+            # error-less 4xx (a WAF/CDN/LB blip) is transient — do not brick
+            # a valid credential over it.
+            dead_token = resp.status_code in (400, 401, 403) and any(
+                code in str(detail) for code in _REAUTH_ERROR_CODES
+            )
+            if dead_token:
+                # Re-read before writing: another worker may have rotated this
+                # credential (making OUR attempt fail with a stale token) or
+                # the admin may have signed out mid-flight. Either way, don't
+                # clobber the shared store with our stale record.
+                current = _load(_auth_path())
+                if not current or current.get("refresh_token") != attempted_rt:
+                    logger.info(
+                        "ChatGPT refresh lost a rotation race; using current store"
+                    )
+                    return _credentials_from(current) if current else None
                 logger.warning(
                     "ChatGPT token refresh requires re-auth (%s %s)",
                     resp.status_code,
                     detail,
                 )
-                record["needs_reauth"] = True
-                _write_private(_auth_path(), record)
+                current["needs_reauth"] = True
+                _write_private(_auth_path(), current)
             else:
                 logger.warning(
                     "ChatGPT token refresh failed transiently (%s %s)",
@@ -358,6 +426,12 @@ async def get_access_credentials(
                 )
             return None
 
-        _persist_tokens(resp.json(), existing=record)
+        # Re-read before persisting: if the admin cleared the store during the
+        # network round-trip, don't resurrect it.
+        current = _load(_auth_path())
+        if not current or current.get("refresh_token") != attempted_rt:
+            logger.info("ChatGPT store changed during refresh; not overwriting")
+            return _credentials_from(current) if current else None
+        _persist_tokens(resp.json(), existing=current)
         refreshed = _load(_auth_path()) or {}
         return _credentials_from(refreshed)

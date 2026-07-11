@@ -237,6 +237,69 @@ async def test_chatgpt_resolves_last_in_auto_order(monkeypatch):
     assert llm_providers.resolve_embed_provider() is None
 
 
+async def test_rank_complete_dispatches_to_chatgpt(monkeypatch):
+    """The resolution -> dispatch wiring, not just the two pieces alone."""
+    _set_no_keys(monkeypatch)
+    _seed_auth()
+    monkeypatch.setattr(settings, "discovery_rank_provider", "chatgpt")
+
+    captured = {}
+
+    async def fake_complete(prompt, model):
+        captured["prompt"] = prompt
+        captured["model"] = model
+        return "dispatched"
+
+    monkeypatch.setattr(llm_providers, "_complete_chatgpt", fake_complete)
+    result = await llm_providers.rank_complete("rank this")
+    assert result == "dispatched"
+    assert captured == {"prompt": "rank this", "model": "gpt-5.1-codex"}
+
+
+async def test_refresh_ignores_concurrent_rotation(monkeypatch):
+    """A refresh whose token was rotated by another worker mid-call must not
+    clobber the store with its stale record."""
+    _seed_auth(expires_in=-10, refresh_token="rt-old")
+
+    async def fake_post(*_args, **kwargs):
+        # Simulate a peer worker rotating the credential while our POST is in
+        # flight: the on-disk store now holds a fresh token under rt-new.
+        chatgpt_auth._persist_tokens(
+            {
+                "access_token": _access_token(),
+                "refresh_token": "rt-new",
+            }
+        )
+        return httpx.Response(400, json={"error": "invalid_grant"})
+
+    async def fake_aenter(self):
+        return self
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    monkeypatch.setattr(httpx.AsyncClient, "__aenter__", fake_aenter)
+
+    creds = await chatgpt_auth.get_access_credentials()
+    # We used the peer's fresh credentials instead of marking needs_reauth.
+    assert creds is not None
+    record = chatgpt_auth._load(chatgpt_auth._auth_path())
+    assert record["refresh_token"] == "rt-new"
+    assert record.get("needs_reauth") is not True
+    assert chatgpt_auth.has_auth() is True
+
+
+async def test_refresh_empty_body_is_transient_not_reauth(monkeypatch):
+    """A 403 with no error code (WAF/CDN blip) must NOT brick the sign-in."""
+    _seed_auth(expires_in=-10)
+
+    def handler(request):
+        return httpx.Response(403, text="")
+
+    _mock_http(monkeypatch, chatgpt_auth, handler)
+    assert (await chatgpt_auth.get_access_credentials()) is None
+    assert chatgpt_auth.auth_status()["needs_reauth"] is False
+    assert chatgpt_auth.has_auth() is True
+
+
 # --- the completion call -----------------------------------------------------
 
 
@@ -342,6 +405,41 @@ async def test_complete_chatgpt_surfaces_usage_limit(monkeypatch):
         await llm_providers._complete_chatgpt("prompt", "gpt-5.1-codex")
     assert "429" in str(excinfo.value)
     assert "usage_limit_reached" in str(excinfo.value)
+
+
+async def test_complete_chatgpt_stream_without_terminal_event(monkeypatch):
+    _seed_auth()
+
+    def handler(request):
+        # Deltas but no completed/done/[DONE] — a truncated stream.
+        return httpx.Response(
+            200,
+            content=_sse([{"type": "response.output_text.delta", "delta": "partial"}]),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    _mock_http(monkeypatch, llm_providers, handler)
+    with pytest.raises(RuntimeError) as excinfo:
+        await llm_providers._complete_chatgpt("prompt", "gpt-5.1-codex")
+    assert "without a completion event" in str(excinfo.value)
+
+
+async def test_complete_chatgpt_persistent_401_raises_descriptive(monkeypatch):
+    _seed_auth(refresh_token="rt-old")
+
+    def handler(request):
+        if str(request.url).endswith("/oauth/token"):
+            return httpx.Response(
+                200,
+                json={"access_token": _access_token(), "refresh_token": "rt-new"},
+            )
+        return httpx.Response(401)  # both response calls 401
+
+    _mock_http(monkeypatch, llm_providers, handler)
+    with pytest.raises(RuntimeError) as excinfo:
+        await llm_providers._complete_chatgpt("prompt", "gpt-5.1-codex")
+    # A real message, not the empty bare-sentinel str.
+    assert "Codex" in str(excinfo.value) and str(excinfo.value)
 
 
 async def test_complete_chatgpt_response_failed_event(monkeypatch):

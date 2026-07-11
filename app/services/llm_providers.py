@@ -16,6 +16,7 @@ Every network call lives behind a small module-level function so tests can
 monkeypatch the seam instead of mocking SDKs or HTTP.
 """
 
+import asyncio
 import json
 import logging
 
@@ -259,7 +260,16 @@ async def _complete_chatgpt(prompt: str, model: str) -> str:
         creds = await chatgpt_auth.get_access_credentials(force_refresh=True)
         if not creds:
             raise RuntimeError("chatgpt provider re-auth required") from None
-        return await _codex_responses(creds, prompt, model)
+        try:
+            return await _codex_responses(creds, prompt, model)
+        except _CodexUnauthorized:
+            # A freshly refreshed token still 401s — the Codex backend is
+            # rejecting the account (e.g. Codex access revoked), not a stale
+            # token. Surface a real message instead of the bare sentinel.
+            raise RuntimeError(
+                "Codex backend rejected a freshly refreshed token (401); "
+                "the ChatGPT account may lack Codex access"
+            ) from None
 
 
 async def _codex_responses(creds: tuple[str, str], prompt: str, model: str) -> str:
@@ -298,36 +308,54 @@ async def _codex_responses(creds: tuple[str, str], prompt: str, model: str) -> s
         "accept": "text/event-stream",
     }
     parts: list[str] = []
-    async with httpx.AsyncClient(timeout=_CHATGPT_TIMEOUT) as client:
-        async with client.stream(
-            "POST", _CHATGPT_RESPONSES_URL, headers=headers, json=payload
-        ) as resp:
-            if resp.status_code == 401:
-                raise _CodexUnauthorized()
-            if resp.status_code >= 400:
-                body = (await resp.aread()).decode("utf-8", "replace")[:300]
-                raise RuntimeError(f"Codex backend {resp.status_code}: {body}")
-            async for line in resp.aiter_lines():
-                if not line.startswith("data:"):
-                    continue
-                data = line[5:].strip()
-                if data == "[DONE]":
-                    break
-                try:
-                    event = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
-                event_type = event.get("type")
-                if event_type == "response.output_text.delta":
-                    delta = event.get("delta")
-                    if isinstance(delta, str):
-                        parts.append(delta)
-                elif event_type in ("response.completed", "response.done"):
-                    break
-                elif event_type == "response.failed":
-                    error = (event.get("response") or {}).get("error") or {}
-                    raise RuntimeError(
-                        "Codex response failed: "
-                        f"{error.get('code')} {error.get('message')}"
-                    )
+    done = False
+    # httpx's scalar timeout is per-read (it resets on every chunk / SSE
+    # keep-alive comment), so a wedged-but-alive stream could hang forever
+    # while holding the per-user discovery lock. Bound the whole exchange.
+    async with asyncio.timeout(_CHATGPT_TIMEOUT):
+        async with httpx.AsyncClient(timeout=_CHATGPT_TIMEOUT) as client:
+            async with client.stream(
+                "POST", _CHATGPT_RESPONSES_URL, headers=headers, json=payload
+            ) as resp:
+                if resp.status_code == 401:
+                    raise _CodexUnauthorized()
+                if resp.status_code >= 400:
+                    body = (await resp.aread()).decode("utf-8", "replace")[:300]
+                    raise RuntimeError(f"Codex backend {resp.status_code}: {body}")
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        done = True
+                        break
+                    try:
+                        event = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    event_type = event.get("type")
+                    if event_type == "response.output_text.delta":
+                        delta = event.get("delta")
+                        if isinstance(delta, str):
+                            parts.append(delta)
+                    elif event_type in ("response.completed", "response.done"):
+                        done = True
+                        break
+                    elif event_type in ("response.failed", "error"):
+                        error = (event.get("response") or {}).get("error") or event
+                        raise RuntimeError(
+                            "Codex response failed: "
+                            f"{error.get('code')} {error.get('message')}"
+                        )
+                    elif event_type == "response.incomplete":
+                        reason = (event.get("response") or {}).get(
+                            "incomplete_details"
+                        ) or {}
+                        raise RuntimeError(
+                            f"Codex response incomplete: {reason.get('reason')}"
+                        )
+    if not done:
+        # Stream ended with no terminal event — don't pass a truncated answer
+        # off as complete.
+        raise RuntimeError("Codex stream ended without a completion event")
     return "".join(parts)

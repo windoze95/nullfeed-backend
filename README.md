@@ -146,9 +146,11 @@ well.
    response contains a `verification_url` and a `user_code`.
 3. Open the URL, sign in, enter the code.
 4. `POST /api/settings/chatgpt-login/poll` until it returns
-   `{"status": "connected"}`. Done — the `chatgpt` rank provider is now
-   available (auto-picked when no API keys are set, or pin it with
-   `NULLFEED_RANK_PROVIDER=chatgpt`).
+   `{"status": "connected"}`.
+5. Set **`NULLFEED_RANK_PROVIDER=chatgpt`**. This pin is required in the
+   normal setup: your embedding key (Gemini/OpenAI) would otherwise win the
+   ranking slot too, so without the pin Discover keeps ranking on that
+   metered key instead of your ChatGPT plan.
 
 **Caveats:** this is an unofficial surface OpenAI operates for Codex
 clients — it may change or be gated at any time, and Discover shares your
