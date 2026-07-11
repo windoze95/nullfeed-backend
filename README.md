@@ -108,8 +108,8 @@ NullFeed is a self-hosted YouTube media center that wraps **yt-dlp** with a poli
 | `OPENAI_API_KEY`         | _(none)_  | OpenAI API key — enables the embeddings-based Discover pipeline and/or OpenAI ranking |
 | `NULLFEED_EMBED_PROVIDER`| _(auto)_  | Discover embedding provider (`gemini` / `openai`); blank auto-picks from available keys. Switching re-embeds from scratch |
 | `NULLFEED_RANK_PROVIDER` | _(auto)_  | Discover ranking provider (`anthropic` / `gemini` / `openai`); blank auto-picks from available keys |
-| `NULLFEED_EMBED_MODEL`   | _(auto)_  | Override the embedding model (default per provider)     |
-| `NULLFEED_RANK_MODEL`    | _(auto)_  | Override the ranking model (default per provider)       |
+| `NULLFEED_EMBED_MODEL`   | _(auto)_  | Override the embedding model (requires `NULLFEED_EMBED_PROVIDER`) |
+| `NULLFEED_RANK_MODEL`    | _(auto)_  | Override the ranking model (requires `NULLFEED_RANK_PROVIDER`) |
 | `DOWNLOAD_CONCURRENCY`   | `2`       | Max simultaneous yt-dlp downloads                        |
 | `MEDIA_QUALITY`          | `1080p`   | Default download quality (`720p` / `1080p` / `4k` / `best`) |
 | `YOUTUBE_COOKIES_FILE`   | _(auto)_  | Path to a `cookies.txt` so yt-dlp can play **age-restricted / members-only** videos. Defaults to `<config>/cookies.txt` if present. See [Age-restricted videos](#age-restricted-videos). |

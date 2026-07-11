@@ -33,7 +33,7 @@ def upgrade() -> None:
         sa.Column("handle", sa.String(length=255), nullable=True),
         sa.Column("vector", sa.JSON(), nullable=False),
         sa.Column("dim", sa.Integer(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(), nullable=True),
+        sa.Column("updated_at", sa.DateTime(), nullable=False),
         sa.PrimaryKeyConstraint("youtube_channel_id", "model"),
     )
 

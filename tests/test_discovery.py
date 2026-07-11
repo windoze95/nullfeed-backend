@@ -165,6 +165,12 @@ async def test_resolve_providers_auto_and_explicit(monkeypatch):
     monkeypatch.setattr(settings, "discovery_embed_provider", "cohere")
     assert llm_providers.resolve_embed_provider() is None
 
+    # A model override WITHOUT an explicit provider is ignored — auto-detect
+    # could pair it with the wrong vendor's API.
+    _set_keys(monkeypatch, openai="sk-x")
+    monkeypatch.setattr(settings, "discovery_rank_model", "custom-model")
+    assert llm_providers.resolve_rank_provider() == ("openai", "gpt-5.6-luna")
+
 
 # --- fallback to the legacy engine ------------------------------------------
 
@@ -196,7 +202,8 @@ async def test_pipeline_end_to_end(monkeypatch, client, make_user):
     _set_keys(monkeypatch, gemini="g-x")
     _install_search(monkeypatch)
     _install_embeddings(monkeypatch)
-    # The reranker also returns an invented channel: it must be dropped.
+    # The reranker returns an invented channel and a duplicate of a valid
+    # pick: both must be dropped.
     _install_ranker(
         monkeypatch,
         picks=[
@@ -204,6 +211,11 @@ async def test_pipeline_end_to_end(monkeypatch, client, make_user):
                 "channel_id": "UCnew1",
                 "channel_name": "Keyboard Channel",
                 "reason": "Because you watch tech reviews",
+            },
+            {
+                "channel_id": "UCnew1",
+                "channel_name": "Keyboard Channel",
+                "reason": "duplicate pick",
             },
             {
                 "channel_id": "UChallucinated",
@@ -411,6 +423,127 @@ def _fail_run(*_args, **_kwargs):
     raise AssertionError("yt-dlp must not be invoked without subscriptions")
 
 
+async def test_reembeds_when_candidate_text_changes(monkeypatch, client, make_user):
+    _set_keys(monkeypatch, gemini="g-x")
+    counts: list[int] = []
+    _install_embeddings(monkeypatch, counts=counts)
+    _install_ranker(monkeypatch)
+    _install_search(monkeypatch)
+
+    user, headers = await make_user()
+    await _seed_profile(user["id"])
+
+    resp = await client.post("/api/discover/refresh", headers=headers)
+    assert resp.status_code == 200, resp.text
+    baseline = list(counts)
+
+    # Same payload -> full cache hit, no embed calls.
+    resp = await client.post("/api/discover/refresh", headers=headers)
+    assert resp.status_code == 200, resp.text
+    assert counts == baseline
+
+    # UCnew1's search titles change -> its profile text (and hash) changes ->
+    # exactly that one candidate is re-embedded under the same model key.
+    changed = {
+        "entries": [
+            dict(SEARCH_JSON["entries"][0], title="A totally different upload"),
+            SEARCH_JSON["entries"][2],
+        ]
+    }
+    _install_search(monkeypatch, payload=changed)
+    resp = await client.post("/api/discover/refresh", headers=headers)
+    assert resp.status_code == 200, resp.text
+    assert counts == baseline + [1]
+
+
+async def test_rerank_candidate_and_final_caps(monkeypatch, client, make_user):
+    _set_keys(monkeypatch, gemini="g-x")
+    _install_embeddings(monkeypatch)
+    bulk_entries = [
+        {
+            "channel_id": f"UCbulk{i:02d}",
+            "channel": f"Bulk Channel {i}",
+            "uploader_id": f"@bulk{i}",
+            "title": f"Bulk video {i}",
+        }
+        for i in range(50)
+    ]
+    _install_search(monkeypatch, payload={"entries": bulk_entries})
+    prompts: list[str] = []
+    _install_ranker(
+        monkeypatch,
+        prompts=prompts,
+        picks=[
+            {
+                "channel_id": f"UCbulk{i:02d}",
+                "channel_name": f"Bulk Channel {i}",
+                "reason": "r",
+            }
+            for i in range(50)
+        ],
+    )
+
+    user, headers = await make_user()
+    await _seed_profile(user["id"])
+
+    resp = await client.post("/api/discover/refresh", headers=headers)
+    assert resp.status_code == 200, resp.text
+    # Only FINAL_RECOMMENDATIONS survive even when the model returns 50 picks.
+    assert len(resp.json()) == discovery.FINAL_RECOMMENDATIONS
+
+    # The reranker was shown at most RERANK_CANDIDATES candidates.
+    rerank_prompt = prompts[-1]
+    assert rerank_prompt.count("- [UCbulk") == discovery.RERANK_CANDIDATES
+
+
+async def test_malformed_search_entries_are_tolerated(monkeypatch, client, make_user):
+    _set_keys(monkeypatch, gemini="g-x")
+    _install_embeddings(monkeypatch)
+    _install_ranker(monkeypatch)
+    # yt-dlp really does emit null entries for failed extractions; the rest
+    # model field-type garbage.
+    _install_search(
+        monkeypatch,
+        payload={
+            "entries": [
+                None,
+                "garbage",
+                {"channel_id": 42, "channel": "Numeric Id"},
+                {"channel_id": "UCnum", "channel": 42},
+                {"channel": "No Id At All"},
+                SEARCH_JSON["entries"][0],
+            ]
+        },
+    )
+
+    user, headers = await make_user()
+    await _seed_profile(user["id"])
+
+    resp = await client.post("/api/discover/refresh", headers=headers)
+    assert resp.status_code == 200, resp.text
+    assert [r["channel_name"] for r in resp.json()] == ["Keyboard Channel"]
+
+
+async def test_llm_queries_are_sanitized_for_subprocess(monkeypatch, client, make_user):
+    _set_keys(monkeypatch, gemini="g-x")
+    _install_embeddings(monkeypatch)
+    calls: list[list[str]] = []
+    _install_search(monkeypatch, calls=calls)
+    _install_ranker(monkeypatch, queries=["bad\x00query\nsecond line"])
+
+    user, headers = await make_user()
+    await _seed_profile(user["id"])
+
+    resp = await client.post("/api/discover/refresh", headers=headers)
+    assert resp.status_code == 200, resp.text
+    assert calls
+    for cmd in calls:
+        target = cmd[-1]
+        assert target.startswith("ytsearch")
+        assert "\x00" not in target
+        assert "\n" not in target
+
+
 # --- small unit pieces -------------------------------------------------------
 
 
@@ -421,8 +554,17 @@ async def test_cosine_and_json_helpers():
 
     fenced = '```json\n["a", "b"]\n```'
     assert discovery._parse_json_array(fenced) == ["a", "b"]
+    # Models routinely append prose despite "JSON only" instructions.
+    with_prose = "```json\n[1, 2]\n```\nThose picks cover all interests!"
+    assert discovery._parse_json_array(with_prose) == [1, 2]
+    leading_prose = 'Here you go: [{"a": 1}] — hope this helps'
+    assert discovery._parse_json_array(leading_prose) == [{"a": 1}]
+    upper_fence = '```JSON\n["x"]\n```'
+    assert discovery._parse_json_array(upper_fence) == ["x"]
     with pytest.raises(Exception):
         discovery._parse_json_array('{"not": "a list"}')
+    with pytest.raises(Exception):
+        discovery._parse_json_array("no json here at all")
 
 
 async def test_fallback_queries_are_deterministic():

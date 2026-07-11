@@ -36,7 +36,9 @@ _EMBED_ORDER = ("gemini", "openai")
 _RANK_ORDER = ("anthropic", "gemini", "openai")
 
 _TIMEOUT = 60.0
-_MAX_RANK_TOKENS = 2048
+# Roomy for 10 picks with reasons, plus headroom for override models that
+# spend part of the budget on thinking.
+_MAX_RANK_TOKENS = 4096
 # Gemini's batchEmbedContents caps the number of requests per call.
 _GEMINI_EMBED_BATCH = 100
 
@@ -68,9 +70,17 @@ def _resolve(
             )
             return None
         return explicit, (model_override or defaults[explicit])
+    if model_override:
+        # Auto-detect could pair the override with a different vendor than
+        # the user meant (e.g. an OpenAI model name against the Gemini API),
+        # failing every call. Overrides require an explicit provider.
+        logger.warning(
+            "Model override %r ignored: set the provider explicitly to use it",
+            model_override,
+        )
     for provider in order:
         if _provider_key(provider):
-            return provider, (model_override or defaults[provider])
+            return provider, defaults[provider]
     return None
 
 
@@ -137,7 +147,9 @@ async def _embed_gemini(texts: list[str], model: str) -> list[list[float]]:
             batch = texts[start : start + _GEMINI_EMBED_BATCH]
             resp = await client.post(
                 f"{_GEMINI_BASE}/{model}:batchEmbedContents",
-                params={"key": settings.gemini_api_key},
+                # Header, NOT a ?key= query param: httpx logs full request
+                # URLs at INFO, which would leak the key into app logs.
+                headers={"x-goog-api-key": settings.gemini_api_key},
                 json={
                     "requests": [
                         {
@@ -175,15 +187,19 @@ async def _complete_anthropic(prompt: str, model: str) -> str:
         max_tokens=_MAX_RANK_TOKENS,
         messages=[{"role": "user", "content": prompt}],
     )
-    block = message.content[0]
-    return block.text if hasattr(block, "text") else ""
+    # Scan for the first text block: models with thinking enabled (possible
+    # via the NULLFEED_RANK_MODEL override) put a thinking block first.
+    for block in message.content:
+        if getattr(block, "type", "") == "text" and hasattr(block, "text"):
+            return block.text
+    return ""
 
 
 async def _complete_gemini(prompt: str, model: str) -> str:
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
         resp = await client.post(
             f"{_GEMINI_BASE}/{model}:generateContent",
-            params={"key": settings.gemini_api_key},
+            headers={"x-goog-api-key": settings.gemini_api_key},
             json={"contents": [{"parts": [{"text": prompt}]}]},
         )
         resp.raise_for_status()

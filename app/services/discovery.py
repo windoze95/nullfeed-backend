@@ -31,7 +31,8 @@ import subprocess
 import uuid
 from collections import Counter
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.channel import Channel
@@ -67,8 +68,14 @@ MAX_PROFILE_TEXT_CHARS = 1500
 _STOPWORDS = frozenset(
     """a an and are as at be but by for from has have how i in is it its my of on
     or our that the their this to was we what when why with you your vs new best
-    top full official video videos episode ep part""".split()
+    top full official video videos episode ep part recent""".split()
 )
+
+# One generation at a time per user: the pipeline can run for tens of seconds,
+# and unserialized runs (GET lazy path racing POST /refresh, or two clients)
+# would interleave the delete-then-insert in _store_recommendations. Locks are
+# per-process; cross-worker overlap is bounded by SQLite's write serialization.
+_generation_locks: dict[str, asyncio.Lock] = {}
 
 QUERY_PROMPT = """\
 You help a YouTube discovery engine find new channels for a user.
@@ -120,19 +127,22 @@ async def generate_recommendations(
     ranking provider for the retrieval pipeline; otherwise defers to the
     legacy prompt-only engine (which no-ops without an Anthropic key).
     """
-    if not (
-        llm_providers.resolve_embed_provider() and llm_providers.resolve_rank_provider()
-    ):
-        return await legacy_generate_recommendations(user, db)
+    lock = _generation_locks.setdefault(user.id, asyncio.Lock())
+    async with lock:
+        if not (
+            llm_providers.resolve_embed_provider()
+            and llm_providers.resolve_rank_provider()
+        ):
+            return await legacy_generate_recommendations(user, db)
 
-    try:
-        picks = await _run_pipeline(user, db)
-    except Exception as exc:
-        logger.warning("Discovery pipeline failed: %s", exc)
-        return []
-    if not picks:
-        return []
-    return await _store_recommendations(user, db, picks)
+        try:
+            picks = await _run_pipeline(user, db)
+        except Exception as exc:
+            logger.warning("Discovery pipeline failed: %s", exc)
+            return []
+        if not picks:
+            return []
+        return await _store_recommendations(user, db, picks)
 
 
 async def _run_pipeline(user: User, db: AsyncSession) -> list[dict]:
@@ -162,7 +172,11 @@ async def _run_pipeline(user: User, db: AsyncSession) -> list[dict]:
         return []
 
     candidate_vectors = await _embed_cached(db, candidates, model_key)
-    scored = _score_candidates(candidates, candidate_vectors, profile_vectors)
+    # Pure-Python cosine over up to 120x30 high-dim vectors takes O(seconds);
+    # keep it off the event loop like the yt-dlp stage.
+    scored = await asyncio.to_thread(
+        _score_candidates, candidates, candidate_vectors, profile_vectors
+    )
     if not scored:
         return []
 
@@ -271,7 +285,10 @@ def _profile_text(name: str, description: str, titles: list[str]) -> str:
         parts.append(description[:500])
     if titles:
         parts.append("Recent videos: " + "; ".join(t[:120] for t in titles))
-    return "\n".join(parts)[:MAX_PROFILE_TEXT_CHARS]
+    text = "\n".join(parts)[:MAX_PROFILE_TEXT_CHARS]
+    # yt-dlp JSON can carry lone surrogates (broken emoji in titles); strict
+    # utf-8 encoding of those would blow up hashing and the embed request.
+    return text.encode("utf-8", "ignore").decode("utf-8", "ignore")
 
 
 async def _get_all_subscribed_ids(user_id: str, db: AsyncSession) -> set[str]:
@@ -311,10 +328,14 @@ async def _generate_queries(profile: list[dict]) -> list[str]:
     try:
         raw = await llm_providers.rank_complete(prompt)
         queries = _parse_json_array(raw)
-        queries = [q.strip() for q in queries if isinstance(q, str) and q.strip()]
+        queries = [q for q in queries if isinstance(q, str)]
     except Exception as exc:
         logger.warning("Query generation failed (%s); using keyword fallback", exc)
         queries = []
+    # Model output feeds a subprocess argument: scrub control characters
+    # (subprocess.run raises ValueError on NUL, and newlines mangle logs).
+    queries = [re.sub(r"[\x00-\x1f\x7f]+", " ", q).strip() for q in queries]
+    queries = [q for q in queries if q]
     if not queries:
         queries = _fallback_queries(profile)
     return queries[:MAX_SEARCH_QUERIES]
@@ -368,7 +389,9 @@ def _search_channels_sync(query: str) -> list[dict]:
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=SEARCH_TIMEOUT_SECONDS
         )
-    except (subprocess.TimeoutExpired, OSError) as exc:
+    except (subprocess.TimeoutExpired, OSError, ValueError) as exc:
+        # ValueError covers pathological argument bytes (e.g. an embedded NUL
+        # that slipped through sanitization) — degrade this one search only.
         logger.warning("yt-dlp search failed for %r: %s", query, exc)
         return []
     if result.returncode != 0 or not result.stdout.strip():
@@ -402,16 +425,14 @@ async def _harvest_candidates(
     for entries in results:
         for entry in entries:
             channel_id = entry.get("channel_id")
-            name = entry.get("channel") or entry.get("uploader") or ""
-            if not channel_id or not name:
+            name = entry.get("channel") or entry.get("uploader")
+            if not (isinstance(channel_id, str) and channel_id):
                 continue
-            if channel_id in exclude_ids or name.lower() in exclude_names:
+            if not (isinstance(name, str) and name):
                 continue
             handle = entry.get("uploader_id")
             if not (isinstance(handle, str) and handle.startswith("@")):
                 handle = None
-            if handle and handle in exclude_ids:
-                continue
             cand = candidates.setdefault(
                 channel_id,
                 {
@@ -429,7 +450,17 @@ async def _harvest_candidates(
             if isinstance(title, str) and title and len(cand["titles"]) < 6:
                 cand["titles"].append(title)
 
-    ranked = sorted(candidates.values(), key=lambda c: c["hits"], reverse=True)
+    # Exclude AFTER aggregation: dismissals are stored by @handle when one is
+    # known, and not every search entry carries uploader_id — a handle learned
+    # from any entry must disqualify the whole candidate.
+    kept = [
+        c
+        for c in candidates.values()
+        if c["youtube_channel_id"] not in exclude_ids
+        and not (c["handle"] and c["handle"] in exclude_ids)
+        and c["name"].lower() not in exclude_names
+    ]
+    ranked = sorted(kept, key=lambda c: c["hits"], reverse=True)
     ranked = ranked[:MAX_CANDIDATES_TO_EMBED]
     for cand in ranked:
         cand["text"] = _profile_text(cand["name"], "", cand["titles"])
@@ -467,23 +498,43 @@ async def _embed_cached(
 
     if to_embed:
         embedded = await llm_providers.embed_texts([e["text"] for e in to_embed])
+        now = utcnow_naive()
+        rows = []
         for entry, vector in zip(to_embed, embedded):
             channel_id = entry["youtube_channel_id"]
             vectors[channel_id] = vector
-            row = cached.get(channel_id)
-            if row is None:
-                row = ChannelEmbedding(
-                    youtube_channel_id=channel_id, model=model_key, vector=[]
-                )
-                db.add(row)
-            row.text_hash = entry["_text_hash"]
-            row.content = entry["text"]
-            row.name = entry["name"][:255]
-            row.handle = entry.get("handle")
-            row.vector = vector
-            row.dim = len(vector)
-            row.updated_at = utcnow_naive()
-        await db.commit()
+            rows.append(
+                {
+                    "youtube_channel_id": channel_id,
+                    "model": model_key,
+                    "text_hash": entry["_text_hash"],
+                    "content": entry["text"],
+                    "name": entry["name"][:255],
+                    "handle": entry.get("handle"),
+                    "vector": vector,
+                    "dim": len(vector),
+                    "updated_at": now,
+                }
+            )
+        if rows:
+            # Upsert: this cache is shared across users and requests, so a
+            # concurrent pipeline may have inserted the same (channel, model)
+            # PK between our SELECT and this write.
+            stmt = sqlite_insert(ChannelEmbedding).values(rows)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["youtube_channel_id", "model"],
+                set_={
+                    "text_hash": stmt.excluded.text_hash,
+                    "content": stmt.excluded.content,
+                    "name": stmt.excluded.name,
+                    "handle": stmt.excluded.handle,
+                    "vector": stmt.excluded.vector,
+                    "dim": stmt.excluded.dim,
+                    "updated_at": stmt.excluded.updated_at,
+                },
+            )
+            await db.execute(stmt)
+            await db.commit()
 
     return vectors
 
@@ -553,20 +604,28 @@ async def _rerank(
     for item in items:
         if not isinstance(item, dict):
             continue
-        picked = by_id.get(item.get("channel_id"))
+        # pop(): a repeated channel_id in the model output misses the lookup
+        # the second time, so duplicates are dropped along with invented ids.
+        picked = by_id.pop(item.get("channel_id"), None)
         if picked is None:
-            # The model invented a channel or mangled the id; drop it rather
-            # than storing something we can't attribute to a real candidate.
+            # The model invented a channel, mangled the id, or repeated a
+            # pick; drop it rather than storing something unattributable.
             logger.info("Reranker pick not in candidate set: %r", item)
             continue
         reason = item.get("reason")
+        if isinstance(reason, str):
+            # Model-authored text rendered by clients: normalize whitespace
+            # and bound the length (prompt-injected titles can echo here).
+            reason = " ".join(reason.split())[:500]
+        else:
+            reason = ""
         picks.append(
             {
                 "channel_name": picked["name"],
                 # @handle preferred (nicer to display, resolves on subscribe);
                 # the subscribe endpoint accepts raw UC ids equally well.
                 "youtube_channel_id": picked["handle"] or picked["youtube_channel_id"],
-                "reason": reason if isinstance(reason, str) else "",
+                "reason": reason,
             }
         )
         if len(picks) >= FINAL_RECOMMENDATIONS:
@@ -575,12 +634,19 @@ async def _rerank(
 
 
 def _parse_json_array(raw: str) -> list:
-    """Parse a JSON array out of model text, tolerating markdown fences."""
+    """Parse a JSON array out of model text.
+
+    Tolerates markdown fences and prose before or after the array — models
+    routinely append commentary despite "JSON only" instructions.
+    """
     text = raw.strip()
-    if text.startswith("```"):
-        text = text.strip("`")
-        text = text.removeprefix("json").strip()
-    data = json.loads(text)
+    fenced = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL | re.IGNORECASE)
+    if fenced:
+        text = fenced.group(1).strip()
+    start = text.find("[")
+    if start < 0:
+        raise ValueError("No JSON array in model response")
+    data, _ = json.JSONDecoder().raw_decode(text[start:])
     if not isinstance(data, list):
         raise ValueError("Expected a JSON array")
     return data
@@ -593,14 +659,14 @@ def _parse_json_array(raw: str) -> list:
 async def _store_recommendations(
     user: User, db: AsyncSession, picks: list[dict]
 ) -> list[Recommendation]:
-    old_result = await db.execute(
-        select(Recommendation).where(
+    # Bulk delete in the same transaction as the inserts, so a concurrent
+    # reader never observes a half-replaced set.
+    await db.execute(
+        delete(Recommendation).where(
             Recommendation.user_id == user.id,
             Recommendation.dismissed == False,  # noqa: E712
         )
     )
-    for old_rec in old_result.scalars().all():
-        await db.delete(old_rec)
 
     new_recs: list[Recommendation] = []
     for pick in picks:

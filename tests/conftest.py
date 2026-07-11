@@ -26,6 +26,7 @@ from httpx import ASGITransport, AsyncClient
 
 import app.api.auth as auth_api
 import app.api.websocket as websocket_api
+import app.services.discovery as discovery_service
 import app.services.instant_stream as instant_stream
 import app.services.push_gateway as push_gateway
 import app.services.youtube_import as youtube_import
@@ -40,6 +41,9 @@ def _reset_in_memory_state():
     """Clear per-process caches/counters that would leak between tests."""
     yield
     auth_api._pin_throttle.clear()
+    # Locks are bound to the event loop that created them; each test gets a
+    # fresh loop, so a leaked lock would raise 'attached to a different loop'.
+    discovery_service._generation_locks.clear()
     youtube_import._resolve_cache.clear()
     youtube_import._suggestions_cache.clear()
     instant_stream._resolve_cache.clear()
