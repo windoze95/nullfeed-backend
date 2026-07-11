@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 
 from app.api.auth import get_current_user
 from app.models.user import User
-from app.services import chatgpt_auth
+from app.services import ai_config, chatgpt_auth, llm_providers
 from app.utils.ytdlp import (
     clear_cookies,
     cookies_status,
@@ -36,6 +36,15 @@ def _require_admin(user: User) -> None:
 
 class YoutubeCookiesIn(BaseModel):
     cookies: str = Field(..., min_length=1, max_length=1_000_000)
+
+
+class AiKeyIn(BaseModel):
+    key: str = Field(..., min_length=1, max_length=500)
+
+
+class AiSelectionIn(BaseModel):
+    provider: str = Field("", max_length=40)
+    model: str = Field("", max_length=120)
 
 
 @router.get("/youtube-cookies")
@@ -81,6 +90,101 @@ async def delete_youtube_cookies(user: User = Depends(get_current_user)) -> dict
     _require_admin(user)
     clear_cookies()
     return cookies_status()
+
+
+# --- AI providers: runtime keys + provider/model selection -----------------
+
+
+def _ai_status() -> dict:
+    """Full AI-config view for the admin panel. Never includes a raw key."""
+    embed_eff = llm_providers.resolve_embed_provider()
+    rank_eff = llm_providers.resolve_rank_provider()
+    return {
+        "keys": {p: ai_config.key_status(p) for p in ai_config.KEY_PROVIDERS},
+        "embed": {
+            **ai_config.selection_status("embed"),
+            "effective": {"provider": embed_eff[0], "model": embed_eff[1]}
+            if embed_eff
+            else None,
+            "options": list(llm_providers.EMBED_MODELS),
+        },
+        "rank": {
+            **ai_config.selection_status("rank"),
+            "effective": {"provider": rank_eff[0], "model": rank_eff[1]}
+            if rank_eff
+            else None,
+            "options": list(llm_providers.RANK_MODELS),
+        },
+        "availability": {
+            "anthropic": bool(ai_config.get_key("anthropic")),
+            "gemini": bool(ai_config.get_key("gemini")),
+            "openai": bool(ai_config.get_key("openai")),
+            "chatgpt": chatgpt_auth.has_auth(),
+        },
+    }
+
+
+@router.get("/ai-providers")
+async def get_ai_providers(user: User = Depends(get_current_user)) -> dict:
+    """Which keys are set (masked), the embed/rank selection, and what's live."""
+    _require_admin(user)
+    return _ai_status()
+
+
+@router.put("/ai-providers/keys/{provider}")
+async def put_ai_key(
+    provider: str, body: AiKeyIn, user: User = Depends(get_current_user)
+) -> dict:
+    """Set a provider API key at runtime (overrides the env value)."""
+    _require_admin(user)
+    if provider not in ai_config.KEY_PROVIDERS:
+        raise HTTPException(status_code=404, detail="Unknown provider")
+    ai_config.set_key(provider, body.key.strip())
+    # Name + admin id only — never the key value.
+    logger.info("AI %s key set by admin %s", provider, user.id)
+    return _ai_status()
+
+
+@router.delete("/ai-providers/keys/{provider}")
+async def delete_ai_key(provider: str, user: User = Depends(get_current_user)) -> dict:
+    """Clear a runtime key, reverting that provider to its env value (if any)."""
+    _require_admin(user)
+    if provider not in ai_config.KEY_PROVIDERS:
+        raise HTTPException(status_code=404, detail="Unknown provider")
+    ai_config.clear_key(provider)
+    logger.info("AI %s key cleared by admin %s", provider, user.id)
+    return _ai_status()
+
+
+@router.put("/ai-providers/selection/{role}")
+async def put_ai_selection(
+    role: str, body: AiSelectionIn, user: User = Depends(get_current_user)
+) -> dict:
+    """Pin the embed/rank provider (+ optional model), or "" to auto-detect."""
+    _require_admin(user)
+    if role not in ai_config.SELECTION_ROLES:
+        raise HTTPException(status_code=404, detail="Unknown selection role")
+    provider = body.provider.strip().lower()
+    model = body.model.strip()
+    allowed = (
+        llm_providers.EMBED_MODELS if role == "embed" else llm_providers.RANK_MODELS
+    )
+    if provider and provider not in allowed:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Provider {provider!r} is not valid for {role} "
+            f"(choose from {', '.join(allowed)} or leave blank to auto-detect)",
+        )
+    if model and not provider:
+        raise HTTPException(
+            status_code=400,
+            detail="Set the provider explicitly to use a model override",
+        )
+    ai_config.set_selection(role, provider, model)
+    logger.info(
+        "Discovery %s provider set to %r by admin %s", role, provider or "auto", user.id
+    )
+    return _ai_status()
 
 
 # --- ChatGPT (Codex OAuth) sign-in for the Discover rank provider ----------

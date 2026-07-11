@@ -22,8 +22,7 @@ import logging
 
 import httpx
 
-from app.config import settings
-from app.services import chatgpt_auth
+from app.services import ai_config, chatgpt_auth
 
 logger = logging.getLogger(__name__)
 
@@ -68,11 +67,7 @@ def _provider_key(provider: str) -> str:
     if provider == "chatgpt":
         # No API key: "configured" means a completed ChatGPT sign-in.
         return "oauth" if chatgpt_auth.has_auth() else ""
-    return {
-        "anthropic": settings.anthropic_api_key,
-        "gemini": settings.gemini_api_key,
-        "openai": settings.openai_api_key,
-    }.get(provider, "")
+    return ai_config.get_key(provider)
 
 
 def _resolve(
@@ -107,22 +102,14 @@ def _resolve(
 
 def resolve_embed_provider() -> tuple[str, str] | None:
     """Return (provider, model) for embeddings, or None when unavailable."""
-    return _resolve(
-        settings.discovery_embed_provider,
-        settings.discovery_embed_model,
-        EMBED_MODELS,
-        _EMBED_ORDER,
-    )
+    provider, model = ai_config.get_embed_selection()
+    return _resolve(provider, model, EMBED_MODELS, _EMBED_ORDER)
 
 
 def resolve_rank_provider() -> tuple[str, str] | None:
     """Return (provider, model) for ranking, or None when unavailable."""
-    return _resolve(
-        settings.discovery_rank_provider,
-        settings.discovery_rank_model,
-        RANK_MODELS,
-        _RANK_ORDER,
-    )
+    provider, model = ai_config.get_rank_selection()
+    return _resolve(provider, model, RANK_MODELS, _RANK_ORDER)
 
 
 def embed_model_key() -> str | None:
@@ -172,7 +159,7 @@ async def _embed_gemini(texts: list[str], model: str) -> list[list[float]]:
                 f"{_GEMINI_BASE}/{model}:batchEmbedContents",
                 # Header, NOT a ?key= query param: httpx logs full request
                 # URLs at INFO, which would leak the key into app logs.
-                headers={"x-goog-api-key": settings.gemini_api_key},
+                headers={"x-goog-api-key": ai_config.get_key("gemini")},
                 json={
                     "requests": [
                         {
@@ -192,7 +179,7 @@ async def _embed_openai(texts: list[str], model: str) -> list[list[float]]:
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
         resp = await client.post(
             f"{_OPENAI_BASE}/embeddings",
-            headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+            headers={"Authorization": f"Bearer {ai_config.get_key('openai')}"},
             json={"model": model, "input": texts},
         )
         resp.raise_for_status()
@@ -204,7 +191,7 @@ async def _embed_openai(texts: list[str], model: str) -> list[list[float]]:
 async def _complete_anthropic(prompt: str, model: str) -> str:
     import anthropic  # lazy: keep the dependency optional at runtime
 
-    client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+    client = anthropic.AsyncAnthropic(api_key=ai_config.get_key("anthropic"))
     message = await client.messages.create(
         model=model,
         max_tokens=_MAX_RANK_TOKENS,
@@ -222,7 +209,7 @@ async def _complete_gemini(prompt: str, model: str) -> str:
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
         resp = await client.post(
             f"{_GEMINI_BASE}/{model}:generateContent",
-            headers={"x-goog-api-key": settings.gemini_api_key},
+            headers={"x-goog-api-key": ai_config.get_key("gemini")},
             json={"contents": [{"parts": [{"text": prompt}]}]},
         )
         resp.raise_for_status()
@@ -235,7 +222,7 @@ async def _complete_openai(prompt: str, model: str) -> str:
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
         resp = await client.post(
             f"{_OPENAI_BASE}/chat/completions",
-            headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+            headers={"Authorization": f"Bearer {ai_config.get_key('openai')}"},
             json={
                 "model": model,
                 "messages": [{"role": "user", "content": prompt}],

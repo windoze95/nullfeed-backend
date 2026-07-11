@@ -5,7 +5,7 @@ import uuid
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import settings
+from app.services import ai_config
 from app.models.channel import Channel
 from app.models.recommendation import Recommendation
 from app.models.subscription import UserSubscription
@@ -44,7 +44,8 @@ async def generate_recommendations(
     db: AsyncSession,
 ) -> list[Recommendation]:
     """Generate AI-powered channel recommendations for a user."""
-    if not settings.anthropic_api_key:
+    anthropic_key = ai_config.get_key("anthropic")
+    if not anthropic_key:
         logger.info("No Anthropic API key configured; skipping recommendations.")
         return []
 
@@ -70,7 +71,7 @@ async def generate_recommendations(
     )
 
     try:
-        client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+        client = anthropic.AsyncAnthropic(api_key=anthropic_key)
         message = await client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=1024,

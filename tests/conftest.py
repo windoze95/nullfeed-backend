@@ -26,6 +26,7 @@ from httpx import ASGITransport, AsyncClient
 
 import app.api.auth as auth_api
 import app.api.websocket as websocket_api
+import app.services.ai_config as ai_config
 import app.services.chatgpt_auth as chatgpt_auth
 import app.services.discovery as discovery_service
 import app.services.instant_stream as instant_stream
@@ -47,6 +48,7 @@ def _reset_in_memory_state():
     discovery_service._generation_locks.clear()
     chatgpt_auth._reset_state()
     chatgpt_auth.clear_auth()
+    ai_config.clear()
     youtube_import._resolve_cache.clear()
     youtube_import._suggestions_cache.clear()
     instant_stream._resolve_cache.clear()

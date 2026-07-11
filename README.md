@@ -132,6 +132,16 @@ NullFeed is a self-hosted YouTube media center that wraps **yt-dlp** with a poli
 
 ---
 
+## Managing AI providers from the app
+
+You don't have to set the AI keys or provider selection via env vars. An admin
+can manage them in **Settings → AI providers**: paste/clear the Anthropic,
+Gemini, and OpenAI keys, pick the embedding and ranking provider (and model),
+and connect a ChatGPT subscription — all stored securely on the server (0600
+files under the config volume, never returned to the client once set). The env
+vars above act as bootstrap defaults; anything set in the app overrides them,
+and clearing an in-app value reverts to the env default. No redeploy needed.
+
 ## Use your ChatGPT subscription for Discover ranking
 
 Instead of an OpenAI API key, the Discover reranker can run on a ChatGPT

@@ -17,7 +17,7 @@ import logging
 
 import httpx
 
-from app.config import settings
+from app.services import ai_config
 from app.services.download_manager import fetch_transcript
 
 logger = logging.getLogger(__name__)
@@ -99,7 +99,7 @@ def _claude_complete(prompt: str) -> str:
     """Run one synchronous Claude completion and return the response text."""
     import anthropic
 
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    client = anthropic.Anthropic(api_key=ai_config.get_key("anthropic"))
     message = client.messages.create(
         model=_AI_MODEL,
         max_tokens=_AI_MAX_TOKENS,
@@ -161,6 +161,6 @@ def resolve_ad_segments(youtube_video_id: str) -> list[dict]:
     sponsorblock = fetch_sponsorblock_segments(youtube_video_id)
     if sponsorblock:
         return sponsorblock
-    if settings.anthropic_api_key:
+    if ai_config.get_key("anthropic"):
         return detect_ad_segments_with_ai(youtube_video_id)
     return []
