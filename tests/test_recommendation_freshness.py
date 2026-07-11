@@ -1,4 +1,4 @@
-"""Recommendation freshness: invalidate-on-subscription-change + staleness sweep."""
+"""Recommendation freshness: invalidate-on-unsubscribe + subscribe preserves."""
 
 import pytest
 from sqlalchemy import select
@@ -114,9 +114,12 @@ async def test_unsubscribe_invalidates_recommendations(client, make_user):
     assert await _live_names(other["id"]) == ["Live One", "Live Two"]
 
 
-async def test_subscribe_invalidates_recommendations(
+async def test_subscribe_preserves_recommendations(
     client, make_user, poll_delay, monkeypatch
 ):
+    # Subscribing to a recommendation (the Explore "browse and pick" flow) must
+    # NOT clear the whole list — the client dismisses just the picked card. Only
+    # unsubscribing (a taste change) and the staleness sweep invalidate.
     monkeypatch.setattr(
         "app.api.channels.fetch_channel_metadata",
         lambda cid: {"channel_id": "UCsub", "name": "Sub Channel", "handle": "@sub"},
@@ -134,13 +137,10 @@ async def test_subscribe_invalidates_recommendations(
         headers=headers,
     )
     assert resp.status_code == 200, resp.text
-    assert await _live_names(user["id"]) == []
-    assert await _all_names(user["id"]) == ["Dismissed"]
+    assert await _live_names(user["id"]) == ["Live One", "Live Two"]
 
 
-async def test_bulk_subscribe_invalidates_recommendations(
-    client, make_user, poll_delay
-):
+async def test_bulk_subscribe_preserves_recommendations(client, make_user, poll_delay):
     user, headers = await make_user()
     await _seed_recs(user["id"])
 
@@ -151,27 +151,4 @@ async def test_bulk_subscribe_invalidates_recommendations(
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["results"][0]["status"] == "subscribed"
-    assert await _live_names(user["id"]) == []
-
-
-async def test_bulk_already_subscribed_does_not_invalidate(
-    client, make_user, poll_delay
-):
-    user, headers = await make_user()
-    # Subscribe once.
-    first = await client.post(
-        "/api/channels/subscribe-bulk",
-        json={"items": [{"youtube_channel_id": "UCdup", "name": "Dup Channel"}]},
-        headers=headers,
-    )
-    assert first.json()["results"][0]["status"] == "subscribed"
-    # Now seed recs, then re-subscribe to the SAME channel (already_subscribed).
-    await _seed_recs(user["id"])
-    again = await client.post(
-        "/api/channels/subscribe-bulk",
-        json={"items": [{"youtube_channel_id": "UCdup", "name": "Dup Channel"}]},
-        headers=headers,
-    )
-    assert again.json()["results"][0]["status"] == "already_subscribed"
-    # No real follow change -> recommendations untouched.
     assert await _live_names(user["id"]) == ["Live One", "Live Two"]

@@ -204,10 +204,6 @@ async def subscribe(
     # Create/reactivate user video refs for ALL existing videos in this channel
     await _ensure_refs_for_channel(user.id, channel.id, db)
 
-    # Follows changed the taste profile — drop stale recs so the next Discover
-    # open regenerates (and this newly-followed channel stops being suggested).
-    await invalidate_recommendations(user.id, db)
-
     await db.commit()
     await db.refresh(channel)
 
@@ -244,18 +240,6 @@ async def subscribe_bulk(
                     detail="Subscription failed",
                 )
             )
-    # If anything actually subscribed, invalidate once so the next Discover open
-    # regenerates from the new follow set (per-item commits already landed).
-    # Best-effort — this must never discard the batch's committed results.
-    if any(r.status == "subscribed" for r in results):
-        try:
-            await invalidate_recommendations(user.id, db)
-            await db.commit()
-        except Exception:
-            logger.exception(
-                "Could not invalidate recommendations after bulk subscribe"
-            )
-            await db.rollback()
     return BulkSubscribeResponse(results=results)
 
 
