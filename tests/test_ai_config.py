@@ -29,8 +29,8 @@ async def test_get_key_runtime_overrides_env(monkeypatch):
 async def test_get_key_empty_when_neither_set(monkeypatch):
     monkeypatch.setattr(settings, "openai_api_key", "")
     assert ai_config.get_key("openai") == ""
-    # chatgpt never has a key here.
-    assert ai_config.get_key("chatgpt") == ""
+    # An unknown provider never has a key.
+    assert ai_config.get_key("unknown") == ""
 
 
 async def test_corrupt_store_falls_back_to_env(monkeypatch):
@@ -201,11 +201,11 @@ async def test_ai_provider_endpoint_validation(monkeypatch, client, make_user):
     )
     assert resp.status_code == 404, resp.text
 
-    # chatgpt/anthropic are not valid EMBED providers -> 400.
+    # A rank-only provider (anthropic) is not a valid EMBED provider -> 400.
     resp = await client.put(
         "/api/settings/ai-providers/selection/embed",
         headers=admin_headers,
-        json={"provider": "chatgpt"},
+        json={"provider": "anthropic"},
     )
     assert resp.status_code == 400, resp.text
 

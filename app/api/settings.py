@@ -1,10 +1,9 @@
-"""Admin settings: YouTube cookies + ChatGPT (Codex OAuth) sign-in.
+"""Admin settings: YouTube cookies + AI provider configuration.
 
 Lets an admin paste a cookies.txt from the app so age-restricted / members-only
 videos can be extracted, without hand-placing a file on the server (stored via
 ``app/utils/ytdlp``, hot-reloaded on the next yt-dlp call), and manage the
-optional ChatGPT-subscription sign-in that backs the ``chatgpt`` Discover
-rank provider (``app/services/chatgpt_auth``).
+Discover AI provider keys and embed/rank selection (``app/services/ai_config``).
 """
 
 import logging
@@ -14,7 +13,7 @@ from pydantic import BaseModel, Field
 
 from app.api.auth import get_current_user
 from app.models.user import User
-from app.services import ai_config, chatgpt_auth, llm_providers
+from app.services import ai_config, llm_providers
 from app.utils.ytdlp import (
     clear_cookies,
     cookies_status,
@@ -119,7 +118,6 @@ def _ai_status() -> dict:
             "anthropic": bool(ai_config.get_key("anthropic")),
             "gemini": bool(ai_config.get_key("gemini")),
             "openai": bool(ai_config.get_key("openai")),
-            "chatgpt": chatgpt_auth.has_auth(),
         },
     }
 
@@ -185,54 +183,3 @@ async def put_ai_selection(
         "Discovery %s provider set to %r by admin %s", role, provider or "auto", user.id
     )
     return _ai_status()
-
-
-# --- ChatGPT (Codex OAuth) sign-in for the Discover rank provider ----------
-
-
-@router.get("/chatgpt-login")
-async def get_chatgpt_login(user: User = Depends(get_current_user)) -> dict:
-    """Sign-in status: connected / pending / needs re-auth."""
-    _require_admin(user)
-    return chatgpt_auth.auth_status()
-
-
-@router.post("/chatgpt-login")
-async def start_chatgpt_login(user: User = Depends(get_current_user)) -> dict:
-    """Start the device sign-in: open the returned URL, enter the code."""
-    _require_admin(user)
-    try:
-        started = await chatgpt_auth.start_device_login()
-    except chatgpt_auth.DeviceLoginError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
-    except Exception as exc:  # network failure etc. — never a 500 traceback
-        logger.warning("ChatGPT sign-in start failed: %s", exc)
-        raise HTTPException(
-            status_code=502, detail="Could not reach the ChatGPT sign-in service."
-        )
-    logger.info("ChatGPT device sign-in started by admin %s", user.id)
-    return started
-
-
-@router.post("/chatgpt-login/poll")
-async def poll_chatgpt_login(user: User = Depends(get_current_user)) -> dict:
-    """One approval poll; repeat until status is no longer 'pending'."""
-    _require_admin(user)
-    try:
-        return await chatgpt_auth.poll_device_login()
-    except chatgpt_auth.DeviceLoginError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
-    except Exception as exc:
-        logger.warning("ChatGPT sign-in poll failed: %s", exc)
-        raise HTTPException(
-            status_code=502, detail="Could not reach the ChatGPT sign-in service."
-        )
-
-
-@router.delete("/chatgpt-login")
-async def delete_chatgpt_login(user: User = Depends(get_current_user)) -> dict:
-    """Sign out (removes the stored tokens)."""
-    _require_admin(user)
-    chatgpt_auth.clear_auth()
-    logger.info("ChatGPT sign-in cleared by admin %s", user.id)
-    return chatgpt_auth.auth_status()
