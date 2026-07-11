@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy — NullFeed</title>
+<meta name="description" content="NullFeed's privacy policy: your data lives on your server. We never see it.">
+<meta name="theme-color" content="#050505">
+<meta name="color-scheme" content="dark">
+<link rel="icon" href="/static/favicon.png" type="image/png">
+<link rel="stylesheet" href="/site.css?v=2">
+<style>
+  .nf-privacy { max-width: 720px; margin: 0 auto; padding: 96px 24px 80px; position: relative; z-index: 1; }
+  .nf-privacy h1 { margin-bottom: 8px; }
+  .nf-privacy h1 em { color: var(--violet-bright); font-style: normal; }
+  .nf-privacy .updated { color: var(--muted); margin-bottom: 40px; }
+  .nf-privacy h2 { margin: 36px 0 10px; font-size: 1.25rem; }
+  .nf-privacy p, .nf-privacy li { color: var(--muted); line-height: 1.7; }
+  .nf-privacy ul { padding-left: 22px; margin: 10px 0; }
+  .nf-privacy .back { margin-top: 48px; display: inline-block; }
+</style>
+</head>
+<body>
+<div class="glow glow-hero" aria-hidden="true"></div>
+<main class="nf-privacy">
+  <h1>Privacy<em>.</em></h1>
+  <p class="updated">Last updated: July 10, 2026</p>
+
+  <p>NullFeed is a client for your own self-hosted media server. The short version:
+  your data lives on your server and your devices. We don't collect it, we don't
+  see it, and there's nothing for us to sell, share, or lose.</p>
+
+  <h2>What the app collects</h2>
+  <p>Nothing. The NullFeed apps (iOS, Android, Apple&nbsp;TV, web) contain no
+  analytics, telemetry, advertising, or tracking SDKs of any kind.</p>
+
+  <h2>Where your data goes</h2>
+  <ul>
+    <li>The app connects only to the NullFeed server <strong>you</strong> configure —
+      typically one running on your own hardware or hosting.</li>
+    <li>Profiles, watch history, playback progress, and your library live in that
+      server's database, under your control.</li>
+    <li>A small amount of state (your server address, session, and offline
+      downloads) is stored locally on your device so the app works.</li>
+  </ul>
+
+  <h2>What we receive</h2>
+  <p>Nothing. The app never phones home to us. There are no NullFeed accounts, no
+  cloud service, and no third-party data processors.</p>
+
+  <h2>Push notifications</h2>
+  <p>If your server enables push notifications, delivery uses the platform's push
+  service (such as Apple Push Notification service). The payload comes from your
+  server; we operate no notification infrastructure that reads your content.</p>
+
+  <h2>Children's privacy</h2>
+  <p>NullFeed collects no data from anyone, including children.</p>
+
+  <h2>Changes</h2>
+  <p>If this policy changes, the update will be posted on this page with a new
+  date. Since the app collects nothing, changes should be rare and boring.</p>
+
+  <h2>Contact</h2>
+  <p>Questions? Open an issue on the project's GitHub repositories.</p>
+
+  <a class="btn btn-violet back" href="/">Back to the void</a>
+</main>
+</body>
+</html>
