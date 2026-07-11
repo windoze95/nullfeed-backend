@@ -163,9 +163,9 @@ well.
    metered key instead of your ChatGPT plan.
 
 **Caveats:** this is an unofficial surface OpenAI operates for Codex
-clients — it may change or be gated at any time, and Discover shares your
-plan's Codex usage limits (heavy refreshing eats the same quota as Codex
-code reviews). Any failure just disables the provider; nothing else breaks.
+clients — it may change or be gated at any time, and Discover draws on your
+plan's Codex usage allowance, so heavy refreshing can hit that limit. Any
+failure just disables the provider; nothing else breaks.
 
 ## Age-restricted videos
 
