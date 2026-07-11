@@ -7,7 +7,7 @@ from app.database import get_db
 from app.models.recommendation import Recommendation
 from app.models.user import User
 from app.schemas.feed import RecommendationOut
-from app.services.recommendation import generate_recommendations
+from app.services.discovery import generate_recommendations
 
 router = APIRouter(prefix="/api/discover", tags=["discover"])
 
