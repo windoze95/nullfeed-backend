@@ -13,4 +13,5 @@ from app.models.subscription import UserSubscription  # noqa: E402, F401
 from app.models.user_video_ref import UserVideoRef  # noqa: E402, F401
 from app.models.user_queue import UserQueue  # noqa: E402, F401
 from app.models.recommendation import Recommendation  # noqa: E402, F401
+from app.models.channel_embedding import ChannelEmbedding  # noqa: E402, F401
 from app.models.session import Session  # noqa: E402, F401

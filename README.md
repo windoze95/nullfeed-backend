@@ -104,6 +104,12 @@ NullFeed is a self-hosted YouTube media center that wraps **yt-dlp** with a poli
 |--------------------------|-----------|----------------------------------------------------------|
 | `TUBEVAULT_PORT`         | `8484`    | API listen port                                          |
 | `ANTHROPIC_API_KEY`      | _(none)_  | Anthropic API key for AI recommendations (Discover tab)  |
+| `GEMINI_API_KEY`         | _(none)_  | Google Gemini API key — enables the embeddings-based Discover pipeline and/or Gemini ranking |
+| `OPENAI_API_KEY`         | _(none)_  | OpenAI API key — enables the embeddings-based Discover pipeline and/or OpenAI ranking |
+| `NULLFEED_EMBED_PROVIDER`| _(auto)_  | Discover embedding provider (`gemini` / `openai`); blank auto-picks from available keys. Switching re-embeds from scratch |
+| `NULLFEED_RANK_PROVIDER` | _(auto)_  | Discover ranking provider (`anthropic` / `gemini` / `openai`); blank auto-picks from available keys |
+| `NULLFEED_EMBED_MODEL`   | _(auto)_  | Override the embedding model (default per provider)     |
+| `NULLFEED_RANK_MODEL`    | _(auto)_  | Override the ranking model (default per provider)       |
 | `DOWNLOAD_CONCURRENCY`   | `2`       | Max simultaneous yt-dlp downloads                        |
 | `MEDIA_QUALITY`          | `1080p`   | Default download quality (`720p` / `1080p` / `4k` / `best`) |
 | `YOUTUBE_COOKIES_FILE`   | _(auto)_  | Path to a `cookies.txt` so yt-dlp can play **age-restricted / members-only** videos. Defaults to `<config>/cookies.txt` if present. See [Age-restricted videos](#age-restricted-videos). |
@@ -228,7 +234,7 @@ NullFeed includes a Community Applications template for one-click installation o
 3. Configure the template:
    - Set the **API Port** (default: `8484`).
    - Map the four volume paths (`Media`, `Database`, `Config`, `Thumbnails`).
-   - Optionally provide your `ANTHROPIC_API_KEY` for AI recommendations.
+   - Optionally provide an `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, or `OPENAI_API_KEY` for AI recommendations (a Gemini or OpenAI key unlocks the richer embeddings-based Discover pipeline).
 4. Click **Apply** to start the container.
 5. Access the API docs at `http://[SERVER_IP]:8484/docs`.
 

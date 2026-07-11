@@ -36,6 +36,8 @@
   <!-- Environment Variables -->
   <Config Name="TUBEVAULT_PORT" Target="TUBEVAULT_PORT" Default="8484" Description="API listen port" Type="Variable" Display="always" Required="false" Mask="false">8484</Config>
   <Config Name="ANTHROPIC_API_KEY" Target="ANTHROPIC_API_KEY" Default="" Description="Anthropic API key for AI recommendations" Type="Variable" Display="always" Required="false" Mask="true"/>
+  <Config Name="GEMINI_API_KEY" Target="GEMINI_API_KEY" Default="" Description="Google Gemini API key for AI recommendations (embeddings + ranking)" Type="Variable" Display="always" Required="false" Mask="true"/>
+  <Config Name="OPENAI_API_KEY" Target="OPENAI_API_KEY" Default="" Description="OpenAI API key for AI recommendations (embeddings + ranking)" Type="Variable" Display="always" Required="false" Mask="true"/>
   <Config Name="DOWNLOAD_CONCURRENCY" Target="DOWNLOAD_CONCURRENCY" Default="2" Description="Max simultaneous downloads" Type="Variable" Display="advanced" Required="false" Mask="false">2</Config>
   <Config Name="MEDIA_QUALITY" Target="MEDIA_QUALITY" Default="1080p" Description="Download quality (720p/1080p/4k/best)" Type="Variable" Display="always" Required="false" Mask="false">1080p</Config>
   <Config Name="CHECK_INTERVAL_MINUTES" Target="CHECK_INTERVAL_MINUTES" Default="60" Description="Channel poll interval in minutes" Type="Variable" Display="advanced" Required="false" Mask="false">60</Config>

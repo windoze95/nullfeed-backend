@@ -9,6 +9,30 @@ class Settings(BaseSettings):
     # Anthropic
     anthropic_api_key: str = ""
 
+    # Discovery providers (app/services/llm_providers.py). Provider API keys
+    # follow the same unprefixed convention as ANTHROPIC_API_KEY because they
+    # are the vendors' own well-known names; the pipeline knobs are ours and
+    # take the NULLFEED_ prefix. Leave the provider selectors blank to
+    # auto-pick from whichever keys are present (embeddings: gemini, then
+    # openai; ranking: anthropic, then gemini, then openai). With no
+    # embedding provider at all, Discover falls back to the legacy
+    # prompt-only Anthropic engine. The model overrides are escape hatches
+    # for when a vendor retires a default model between our releases.
+    gemini_api_key: str = ""
+    openai_api_key: str = ""
+    discovery_embed_provider: str = Field(
+        default="", validation_alias="NULLFEED_EMBED_PROVIDER"
+    )
+    discovery_rank_provider: str = Field(
+        default="", validation_alias="NULLFEED_RANK_PROVIDER"
+    )
+    discovery_embed_model: str = Field(
+        default="", validation_alias="NULLFEED_EMBED_MODEL"
+    )
+    discovery_rank_model: str = Field(
+        default="", validation_alias="NULLFEED_RANK_MODEL"
+    )
+
     # Downloads
     # Number of videos pulled from the full yt-dlp listing when a channel is
     # cataloged for the first time (its back catalog). Routine polls use the RSS
