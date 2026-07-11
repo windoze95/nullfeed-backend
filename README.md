@@ -107,7 +107,7 @@ NullFeed is a self-hosted YouTube media center that wraps **yt-dlp** with a poli
 | `GEMINI_API_KEY`         | _(none)_  | Google Gemini API key — enables the embeddings-based Discover pipeline and/or Gemini ranking |
 | `OPENAI_API_KEY`         | _(none)_  | OpenAI API key — enables the embeddings-based Discover pipeline and/or OpenAI ranking |
 | `NULLFEED_EMBED_PROVIDER`| _(auto)_  | Discover embedding provider (`gemini` / `openai`); blank auto-picks from available keys. Switching re-embeds from scratch |
-| `NULLFEED_RANK_PROVIDER` | _(auto)_  | Discover ranking provider (`anthropic` / `gemini` / `openai`); blank auto-picks from available keys |
+| `NULLFEED_RANK_PROVIDER` | _(auto)_  | Discover ranking provider (`anthropic` / `gemini` / `openai` / `chatgpt`); blank auto-picks from available keys (a ChatGPT sign-in counts, picked last) |
 | `NULLFEED_EMBED_MODEL`   | _(auto)_  | Override the embedding model (requires `NULLFEED_EMBED_PROVIDER`) |
 | `NULLFEED_RANK_MODEL`    | _(auto)_  | Override the ranking model (requires `NULLFEED_RANK_PROVIDER`) |
 | `DOWNLOAD_CONCURRENCY`   | `2`       | Max simultaneous yt-dlp downloads                        |
@@ -131,6 +131,29 @@ NullFeed is a self-hosted YouTube media center that wraps **yt-dlp** with a poli
 | `/data/thumbnails` | Cached channel art and thumbnails| `/mnt/user/appdata/nullfeed/thumbs`     |
 
 ---
+
+## Use your ChatGPT subscription for Discover ranking
+
+Instead of an OpenAI API key, the Discover reranker can run on a ChatGPT
+Plus/Pro subscription via the same "sign in with ChatGPT" flow Codex CLI
+uses. Embeddings still need a Gemini or OpenAI key (the ChatGPT surface has
+no embeddings) — `GEMINI_API_KEY` from Google AI Studio's free tier pairs
+well.
+
+1. In ChatGPT: Settings -> Security -> enable **device authorization**
+   (off by default).
+2. As the NullFeed admin profile: `POST /api/settings/chatgpt-login` — the
+   response contains a `verification_url` and a `user_code`.
+3. Open the URL, sign in, enter the code.
+4. `POST /api/settings/chatgpt-login/poll` until it returns
+   `{"status": "connected"}`. Done — the `chatgpt` rank provider is now
+   available (auto-picked when no API keys are set, or pin it with
+   `NULLFEED_RANK_PROVIDER=chatgpt`).
+
+**Caveats:** this is an unofficial surface OpenAI operates for Codex
+clients — it may change or be gated at any time, and Discover shares your
+plan's Codex usage limits (heavy refreshing eats the same quota as Codex
+code reviews). Any failure just disables the provider; nothing else breaks.
 
 ## Age-restricted videos
 

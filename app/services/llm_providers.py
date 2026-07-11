@@ -1,21 +1,28 @@
 """Provider seams for the discovery pipeline (embeddings + ranking).
 
 Two providers can supply embeddings (gemini, openai — Anthropic has no
-embeddings API) and three can supply the ranking LLM (anthropic, gemini,
-openai); the two choices are independent and mix-and-match freely. Gemini
-and OpenAI are called over plain REST via httpx so the base image needs no
-extra SDKs; Anthropic reuses the already-installed ``anthropic`` package
-(imported lazily, like the other consumers).
+embeddings API) and four can supply the ranking LLM (anthropic, gemini,
+openai, chatgpt); the two choices are independent and mix-and-match freely.
+Gemini and OpenAI are called over plain REST via httpx so the base image
+needs no extra SDKs; Anthropic reuses the already-installed ``anthropic``
+package (imported lazily, like the other consumers).
+
+The ``chatgpt`` rank provider is special: instead of an API key it uses a
+ChatGPT Plus/Pro subscription via the Codex OAuth sign-in (see
+``app/services/chatgpt_auth``) and calls the ChatGPT Codex backend — an
+unofficial, best-effort surface that shares the plan's Codex usage limits.
 
 Every network call lives behind a small module-level function so tests can
 monkeypatch the seam instead of mocking SDKs or HTTP.
 """
 
+import json
 import logging
 
 import httpx
 
 from app.config import settings
+from app.services import chatgpt_auth
 
 logger = logging.getLogger(__name__)
 
@@ -29,11 +36,16 @@ RANK_MODELS = {
     "anthropic": "claude-haiku-4-5",
     "gemini": "gemini-3.5-flash",
     "openai": "gpt-5.6-luna",
+    # ChatGPT-subscription (Codex OAuth) — models the Codex backend accepts,
+    # not api.openai.com ids.
+    "chatgpt": "gpt-5.1-codex",
 }
 
-# Auto-detect order when no provider is configured explicitly.
+# Auto-detect order when no provider is configured explicitly. chatgpt is
+# last: a completed sign-in is deliberate, but metered API keys are the more
+# predictable default when both are present.
 _EMBED_ORDER = ("gemini", "openai")
-_RANK_ORDER = ("anthropic", "gemini", "openai")
+_RANK_ORDER = ("anthropic", "gemini", "openai", "chatgpt")
 
 _TIMEOUT = 60.0
 # Roomy for 10 picks with reasons, plus headroom for override models that
@@ -44,9 +56,17 @@ _GEMINI_EMBED_BATCH = 100
 
 _GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 _OPENAI_BASE = "https://api.openai.com/v1"
+# The ChatGPT-plan Codex backend. OAuth tokens do NOT work against
+# api.openai.com — the subscription path is only this endpoint.
+_CHATGPT_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses"
+# Streaming with reasoning can take a while; more generous than _TIMEOUT.
+_CHATGPT_TIMEOUT = 120.0
 
 
 def _provider_key(provider: str) -> str:
+    if provider == "chatgpt":
+        # No API key: "configured" means a completed ChatGPT sign-in.
+        return "oauth" if chatgpt_auth.has_auth() else ""
     return {
         "anthropic": settings.anthropic_api_key,
         "gemini": settings.gemini_api_key,
@@ -137,6 +157,8 @@ async def rank_complete(prompt: str) -> str:
         return await _complete_anthropic(prompt, model)
     if provider == "gemini":
         return await _complete_gemini(prompt, model)
+    if provider == "chatgpt":
+        return await _complete_chatgpt(prompt, model)
     return await _complete_openai(prompt, model)
 
 
@@ -221,3 +243,91 @@ async def _complete_openai(prompt: str, model: str) -> str:
         resp.raise_for_status()
         data = resp.json()
     return data["choices"][0]["message"]["content"]
+
+
+class _CodexUnauthorized(RuntimeError):
+    """401 from the Codex backend — refresh once and retry."""
+
+
+async def _complete_chatgpt(prompt: str, model: str) -> str:
+    creds = await chatgpt_auth.get_access_credentials()
+    if not creds:
+        raise RuntimeError("chatgpt provider is not signed in (or needs re-auth)")
+    try:
+        return await _codex_responses(creds, prompt, model)
+    except _CodexUnauthorized:
+        creds = await chatgpt_auth.get_access_credentials(force_refresh=True)
+        if not creds:
+            raise RuntimeError("chatgpt provider re-auth required") from None
+        return await _codex_responses(creds, prompt, model)
+
+
+async def _codex_responses(creds: tuple[str, str], prompt: str, model: str) -> str:
+    """One streamed call to the ChatGPT Codex backend; returns final text.
+
+    The backend hard-requires ``store: false`` + ``stream: true`` and
+    VALIDATES ``instructions`` — arbitrary text is rejected, so we send
+    Codex's own base prompt and carry our real prompt as the user message
+    (the same approach opencode and Hermes use).
+    """
+    from app.services.codex_instructions import CODEX_BASE_INSTRUCTIONS
+
+    access_token, account_id = creds
+    payload = {
+        "model": model,
+        "instructions": CODEX_BASE_INSTRUCTIONS,
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": prompt}],
+            }
+        ],
+        "store": False,
+        "stream": True,
+        "include": ["reasoning.encrypted_content"],
+        # Ranking is easy; keep reasoning cheap so Discover barely dents the
+        # plan's Codex quota. Codex models reject "none", so "low" it is.
+        "reasoning": {"effort": "low", "summary": "auto"},
+    }
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "chatgpt-account-id": account_id,
+        "OpenAI-Beta": "responses=experimental",
+        "originator": "codex_cli_rs",
+        "accept": "text/event-stream",
+    }
+    parts: list[str] = []
+    async with httpx.AsyncClient(timeout=_CHATGPT_TIMEOUT) as client:
+        async with client.stream(
+            "POST", _CHATGPT_RESPONSES_URL, headers=headers, json=payload
+        ) as resp:
+            if resp.status_code == 401:
+                raise _CodexUnauthorized()
+            if resp.status_code >= 400:
+                body = (await resp.aread()).decode("utf-8", "replace")[:300]
+                raise RuntimeError(f"Codex backend {resp.status_code}: {body}")
+            async for line in resp.aiter_lines():
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    event = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                event_type = event.get("type")
+                if event_type == "response.output_text.delta":
+                    delta = event.get("delta")
+                    if isinstance(delta, str):
+                        parts.append(delta)
+                elif event_type in ("response.completed", "response.done"):
+                    break
+                elif event_type == "response.failed":
+                    error = (event.get("response") or {}).get("error") or {}
+                    raise RuntimeError(
+                        "Codex response failed: "
+                        f"{error.get('code')} {error.get('message')}"
+                    )
+    return "".join(parts)
