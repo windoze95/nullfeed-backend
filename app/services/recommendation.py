@@ -2,7 +2,7 @@ import json
 import logging
 import uuid
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services import ai_config
@@ -177,3 +177,19 @@ async def _get_dismissed_names(user_id: str, db: AsyncSession) -> list[str]:
         )
     )
     return [row[0] for row in result.all()]
+
+
+async def invalidate_recommendations(user_id: str, db: AsyncSession) -> None:
+    """Drop the user's live (non-dismissed) recommendations so the next Discover
+    open regenerates them from current subscriptions.
+
+    Dismissed rows (the do-not-recommend list) are preserved. Does NOT commit —
+    the caller's transaction does — and does NOT run the generation pipeline
+    (regeneration is lazy, on the next GET /api/discover with no live recs).
+    """
+    await db.execute(
+        delete(Recommendation).where(
+            Recommendation.user_id == user_id,
+            Recommendation.dismissed == False,  # noqa: E712
+        )
+    )

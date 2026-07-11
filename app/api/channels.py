@@ -14,6 +14,7 @@ from app.models.subscription import UserSubscription
 from app.models.user import User
 from app.models.user_video_ref import REF_KIND_CACHE, UserVideoRef
 from app.models.video import Video
+from app.services.recommendation import invalidate_recommendations
 from app.schemas.channel import (
     BulkSubscribeItem,
     BulkSubscribeItemResult,
@@ -203,11 +204,19 @@ async def subscribe(
     # Create/reactivate user video refs for ALL existing videos in this channel
     await _ensure_refs_for_channel(user.id, channel.id, db)
 
+    # Follows changed the taste profile — drop stale recs so the next Discover
+    # open regenerates (and this newly-followed channel stops being suggested).
+    await invalidate_recommendations(user.id, db)
+
     await db.commit()
     await db.refresh(channel)
 
-    # Trigger an immediate poll for this channel
-    poll_channel_task.delay(channel.id)
+    # Trigger an immediate poll (best-effort — the subscription is already
+    # committed, so a broker hiccup here must not fail the request).
+    try:
+        poll_channel_task.delay(channel.id)
+    except Exception:
+        logger.exception("Could not enqueue poll for channel %s", channel.id)
 
     out = ChannelOut.model_validate(channel)
     out.is_subscribed = True
@@ -235,6 +244,18 @@ async def subscribe_bulk(
                     detail="Subscription failed",
                 )
             )
+    # If anything actually subscribed, invalidate once so the next Discover open
+    # regenerates from the new follow set (per-item commits already landed).
+    # Best-effort — this must never discard the batch's committed results.
+    if any(r.status == "subscribed" for r in results):
+        try:
+            await invalidate_recommendations(user.id, db)
+            await db.commit()
+        except Exception:
+            logger.exception(
+                "Could not invalidate recommendations after bulk subscribe"
+            )
+            await db.rollback()
     return BulkSubscribeResponse(results=results)
 
 
@@ -306,7 +327,12 @@ async def _subscribe_bulk_item(
     await db.commit()
 
     if created:
-        poll_channel_task.delay(channel.id)
+        # Best-effort — the subscription is committed; don't turn a broker
+        # hiccup into an "error" result for a follow that actually landed.
+        try:
+            poll_channel_task.delay(channel.id)
+        except Exception:
+            logger.exception("Could not enqueue poll for channel %s", channel.id)
 
     return BulkSubscribeItemResult(
         youtube_channel_id=item.youtube_channel_id,
@@ -439,6 +465,9 @@ async def unsubscribe(
     if not sub:
         raise HTTPException(status_code=404, detail="Subscription not found")
     await db.delete(sub)
+    # Unfollowing changed the taste profile — drop stale recs so the next
+    # Discover open regenerates without this channel shaping the results.
+    await invalidate_recommendations(user.id, db)
     await db.commit()
     return {"detail": "Unsubscribed"}
 
