@@ -61,6 +61,17 @@ class Settings(BaseSettings):
     poll_interval_cap_minutes: int = 240
     poll_interval_backoff_factor: float = 2.0
 
+    # Discover recommendation freshness
+    # Recommendations are a snapshot from the last generation. A daily sweep
+    # deletes each user's live (non-dismissed) recommendations older than this
+    # many days so they regenerate from current subscriptions on the next
+    # Discover open (regeneration is lazy — inactive users cost nothing). A
+    # value <= 0 disables the sweep. Subscription changes invalidate a user's
+    # recommendations immediately regardless of this.
+    recommendation_stale_days: int = Field(
+        default=7, validation_alias="NULLFEED_RECOMMENDATION_STALE_DAYS"
+    )
+
     # Retention enforcement
     # How often the retention sweep runs (Celery beat, in hours). Each run
     # applies every subscription's retention_policy: e.g. KEEP_LAST_N keeps the

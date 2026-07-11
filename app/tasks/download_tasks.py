@@ -33,6 +33,7 @@ from app.services.download_manager import (
 from app.services.ad_segments import resolve_ad_segments
 from app.services.cache_retention import enforce_cache_retention
 from app.services.download_reaper import reap_stuck_downloads
+from app.services.recommendation_reaper import sweep_stale_recommendations
 from app.services.retention import enforce_retention
 from app.services.session_reaper import reap_expired_sessions
 from app.services.websub import sync_subscriptions
@@ -715,6 +716,26 @@ def reap_expired_sessions_task(self) -> dict:
         return {"status": "ok", "deleted": deleted}
     except Exception:
         logger.exception("Error in reap_expired_sessions_task")
+        return {"status": "error"}
+    finally:
+        db.close()
+
+
+@celery_app.task(
+    name="app.tasks.download_tasks.sweep_stale_recommendations_task",
+    bind=True,
+    max_retries=0,
+)
+def sweep_stale_recommendations_task(self) -> dict:
+    """Periodic task: delete stale Discover recommendations so they regenerate
+    from current subscriptions on the next Discover open."""
+    db = _get_sync_db()
+    try:
+        deleted = sweep_stale_recommendations(db, settings.recommendation_stale_days)
+        return {"status": "ok", "deleted": deleted}
+    except Exception:
+        logger.exception("Error in sweep_stale_recommendations_task")
+        db.rollback()
         return {"status": "error"}
     finally:
         db.close()

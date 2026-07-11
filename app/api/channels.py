@@ -14,6 +14,7 @@ from app.models.subscription import UserSubscription
 from app.models.user import User
 from app.models.user_video_ref import REF_KIND_CACHE, UserVideoRef
 from app.models.video import Video
+from app.services.recommendation import invalidate_recommendations
 from app.schemas.channel import (
     BulkSubscribeItem,
     BulkSubscribeItemResult,
@@ -203,6 +204,10 @@ async def subscribe(
     # Create/reactivate user video refs for ALL existing videos in this channel
     await _ensure_refs_for_channel(user.id, channel.id, db)
 
+    # Follows changed the taste profile — drop stale recs so the next Discover
+    # open regenerates (and this newly-followed channel stops being suggested).
+    await invalidate_recommendations(user.id, db)
+
     await db.commit()
     await db.refresh(channel)
 
@@ -235,6 +240,11 @@ async def subscribe_bulk(
                     detail="Subscription failed",
                 )
             )
+    # If anything actually subscribed, invalidate once so the next Discover open
+    # regenerates from the new follow set (per-item commits already landed).
+    if any(r.status == "subscribed" for r in results):
+        await invalidate_recommendations(user.id, db)
+        await db.commit()
     return BulkSubscribeResponse(results=results)
 
 
@@ -439,6 +449,9 @@ async def unsubscribe(
     if not sub:
         raise HTTPException(status_code=404, detail="Subscription not found")
     await db.delete(sub)
+    # Unfollowing changed the taste profile — drop stale recs so the next
+    # Discover open regenerates without this channel shaping the results.
+    await invalidate_recommendations(user.id, db)
     await db.commit()
     return {"detail": "Unsubscribed"}
 

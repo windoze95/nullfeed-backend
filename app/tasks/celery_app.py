@@ -87,3 +87,14 @@ if settings.websub_callback_url:
         "task": "app.tasks.download_tasks.sync_websub_subscriptions_task",
         "schedule": 6 * 3600,
     }
+
+# Keep Discover recommendations fresh: delete each user's live (non-dismissed)
+# recommendations older than the staleness window so they regenerate from
+# current subscriptions on the next Discover open. Cheap (a single indexed
+# DELETE); a daily wake with a multi-day window is plenty. Off when the window
+# is <= 0.
+if settings.recommendation_stale_days > 0:
+    celery_app.conf.beat_schedule["sweep-stale-recommendations"] = {
+        "task": "app.tasks.download_tasks.sweep_stale_recommendations_task",
+        "schedule": 24 * 3600,
+    }
