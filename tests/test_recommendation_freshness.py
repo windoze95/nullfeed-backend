@@ -100,8 +100,38 @@ async def test_unsubscribe_invalidates_recommendations(client, make_user):
         await seed_subscription(db, user["id"], channel.id)
     await _seed_recs(user["id"])
 
+    # A second user's recommendations must be untouched.
+    other, _ = await make_user("Other")
+    await _seed_recs(other["id"])
+
     resp = await client.delete(
         f"/api/channels/{channel.id}/unsubscribe", headers=headers
+    )
+    assert resp.status_code == 200, resp.text
+    assert await _live_names(user["id"]) == []
+    assert await _all_names(user["id"]) == ["Dismissed"]
+    # Isolation: the other user's live recs survive.
+    assert await _live_names(other["id"]) == ["Live One", "Live Two"]
+
+
+async def test_subscribe_invalidates_recommendations(
+    client, make_user, poll_delay, monkeypatch
+):
+    monkeypatch.setattr(
+        "app.api.channels.fetch_channel_metadata",
+        lambda cid: {"channel_id": "UCsub", "name": "Sub Channel", "handle": "@sub"},
+    )
+    monkeypatch.setattr(
+        "app.api.channels.fetch_channel_images",
+        lambda cid: {"avatar_url": None, "banner_url": None},
+    )
+    user, headers = await make_user()
+    await _seed_recs(user["id"])
+
+    resp = await client.post(
+        "/api/channels/subscribe",
+        json={"youtube_channel_id": "UCsub"},
+        headers=headers,
     )
     assert resp.status_code == 200, resp.text
     assert await _live_names(user["id"]) == []
